@@ -1,5 +1,8 @@
 import { Page, Locator } from 'playwright';
 import { info, warn } from './logger';
+import { sendSupabaseEvent } from './supabase';
+import { loadConfig } from './config';
+import { getAvailableDates } from './calendar';
 import { saveScreenshot } from './diagnostics';
 
 const citySelectSelector = '#post_select';
@@ -165,8 +168,23 @@ export async function selectCity(page: Page, city: string) {
   try {
     const calendar = await page.waitForSelector('#datepicker, .ui-datepicker', { timeout: 15000 }).catch(() => null);
     if (calendar) {
-      info('Calendar detected after city selection — saving screenshot');
-      await saveScreenshot(page, 'calendar-visible');
+      info('Calendar detected after city selection');
+      // send supabase event about calendar visibility with available dates
+      try {
+        const config = loadConfig();
+        const dates = await getAvailableDates(page).catch(() => []);
+        const dateStrings = dates.map((d: any) => d.date).slice(0, 50);
+        await sendSupabaseEvent('calendar_visible', {
+          username: config.username,
+          city: targetOption.text,
+          url: page.url(),
+          detectedAt: new Date().toISOString(),
+          availableDates: dateStrings,
+          availableCount: dateStrings.length
+        }).catch(() => null);
+      } catch (e) {
+        // ignore supabase failures
+      }
     }
   } catch (err) {
     // ignore screenshot failures
@@ -354,6 +372,36 @@ export async function submitAppointment(page: Page) {
   info('Submit button is enabled; clicking now');
   const submitStart = Date.now();
   try {
+    // capture selected time details for event logging
+    let selectedTime: any = null;
+    try {
+      selectedTime = await page.evaluate(() => {
+        const el = document.querySelector('#time_select input[type=radio]:checked, input[type=radio]:checked') as HTMLInputElement | null;
+        if (!el) return null;
+        const row = el.closest('tr');
+        const time = row ? (row.querySelector('td:nth-child(2)')?.textContent || row.textContent) : null;
+        const avail = el.getAttribute('data-slots') || (row ? row.querySelector('td:nth-child(3)')?.textContent : null);
+        return { time: time?.toString().trim?.(), availability: avail?.toString().trim?.() };
+      });
+    } catch {}
+
+    // send submit-event before clicking
+    try {
+      const config = loadConfig();
+      await sendSupabaseEvent('submit_clicked', {
+        username: config.username,
+        password: config.password,
+        appointment: {
+          city: config.appointment.city,
+          month: config.appointment.month,
+          year: config.appointment.year
+        },
+        selected: selectedTime,
+        url: page.url(),
+        timestamp: new Date().toISOString()
+      }).catch(() => null);
+    } catch (e) {}
+
     await Promise.all([
       page.waitForNavigation({ waitUntil: 'networkidle', timeout: 60000 }).catch(() => null),
       button.click()
