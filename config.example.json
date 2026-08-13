@@ -1,0 +1,38 @@
+{
+  "authUrl": "https://atlasauth.b2clogin.com/<tenant>/oauth2/v2.0/authorize?...",
+  "scheduleUrl": "https://www.usvisascheduling.com/en-US/ofc-schedule/",
+  "username": "YOUR_USERNAME",
+  "password": "YOUR_PASSWORD",
+  "securityQuestions": [
+    {
+      "question": "What is your mother's maiden name?",
+      "answer": "YourAnswer"
+    },
+    {
+      "question": "What was the name of your first school?",
+      "answer": "YourAnswer"
+    },
+    {
+      "question": "What city were you born in?",
+      "answer": "YourAnswer"
+    }
+  ],
+  "appointment": {
+    "city": "Example City",
+    "month": "Aug",
+    "year": 2026,
+    "startDate": "2026-08-10",
+    "endDate": "2026-09-30",
+    "preferredTime": null
+  },
+  "chromeExecutable": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+  "chromeUserDataDir": "C:\\temp\\chrome-debug",
+  "chromeRemoteDebugPort": 9222,
+  "maxSlotAttempts": 10,
+  "slotRetryDelayMs": 10000,
+  "cloudflareWaitMs": 180000,
+  "debugNetwork": false,
+  "useCamoufox": false,
+  "autoSolveCloudflare": false,
+  "headless": false
+}
