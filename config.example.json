@@ -34,5 +34,7 @@
   "debugNetwork": false,
   "useCamoufox": false,
   "autoSolveCloudflare": false,
-  "headless": false
+  "headless": false,
+  "alertOnMajorEvents": true,
+  "screenshotAfterSelection": true
 }

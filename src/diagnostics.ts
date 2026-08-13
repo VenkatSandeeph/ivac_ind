@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { Page, BrowserContext } from 'playwright';
+import type { Page, BrowserContext } from 'playwright';
 
 const artifactsBase = path.resolve(process.cwd(), 'artifacts');
 

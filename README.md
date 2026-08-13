@@ -19,6 +19,10 @@ This project automates the US Visa scheduling flow using Playwright and a real C
 
 3. Edit `config.local.json` with your values.
 
+   Additional runtime controls:
+   - `alertOnMajorEvents` (boolean): emits major lifecycle events to Supabase when configured.
+   - `screenshotAfterSelection` (boolean): captures screenshots after date and time selection.
+
 4. Optionally set environment variables instead of `config.local.json`:
 
    - `AUTH_URL`
@@ -62,17 +66,44 @@ You can package the compiled Node program into a single Windows `.exe` using `pk
 npm install --omit=optional
 ```
 
-2. Build TypeScript and create the executable:
+2. Build TypeScript and create the executable + runtime config:
 
 ```bash
-npm run build:exe
+npm run build:release
 ```
 
-This produces `dist/IVAC.exe`. Place `config.local.json` alongside `dist/IVAC.exe` and run:
+This produces:
+
+- `dist/ivac.exe`
+- `dist/config.local.json`
+
+Edit `dist/config.local.json` with your values, then run:
 
 ```powershell
-.\dist\IVAC.exe
+.\dist\ivac.exe
 ```
+
+## Optional Desktop UI Launcher
+
+If you want a small window to run automation and view logs in one place:
+
+1. Build release assets first:
+
+```bash
+npm run build:release
+```
+
+2. Start the Electron UI:
+
+```bash
+npm run ui:start
+```
+
+What it provides:
+
+- Start/Stop buttons for `dist/index.js` using local Node.js
+- Editable `dist/config.local.json` in the same window
+- Live stdout/stderr log stream in a log panel
 
 Notes:
 - The exe bundles the Node runtime and your compiled code, but not the Playwright browser binaries. For automation that launches a local browser, ensure a compatible Chrome/Chromium is installed on the target machine or use the script to connect to an existing remote-debugging Chrome (see `chromeRemoteDebugPort` in `config.local.json`).
@@ -102,8 +133,13 @@ Artifacts are saved to `artifacts/` on failure:
 - `logs/`
 - `traces/`
 
+Runtime checkpoint and recovery metadata:
+
+- `state/checkpoint.json`
+
 ## Notes
 
 - Do not store secrets in source control.
 - `config.local.json` is ignored by `.gitignore`.
 - If Cloudflare verification appears, the script pauses and waits for manual completion.
+- Supabase telemetry includes configured event payload fields.

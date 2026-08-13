@@ -1,7 +1,22 @@
-import { chromium, Browser, BrowserContext, Page } from 'playwright';
+import path from 'path';
+import type { Browser, BrowserContext, Page } from 'playwright';
 import { info, warn } from './logger';
 import type { AutomationConfig } from './config';
 import { waitForPortOpen } from './utils';
+
+function loadPlaywrightRuntime() {
+  const runtimeRequire = eval('require') as NodeRequire;
+  const isPkgRuntime = typeof (process as any).pkg !== 'undefined';
+
+  if (isPkgRuntime) {
+    const externalPlaywrightPath = path.resolve(process.cwd(), 'node_modules', 'playwright');
+    return runtimeRequire(externalPlaywrightPath);
+  }
+
+  return runtimeRequire('playwright');
+}
+
+const { chromium } = loadPlaywrightRuntime();
 
 export type BrowserLaunch = {
   browser: Browser;
@@ -55,17 +70,20 @@ export async function launchBrowser(config: AutomationConfig): Promise<BrowserLa
 
   info('Launching Chrome with remote debugging');
 
-  const browser = await chromium.launch({
+  const context = await chromium.launchPersistentContext(config.chromeUserDataDir, {
     executablePath: config.chromeExecutable,
     headless: config.headless === true,
+    ignoreHTTPSErrors: true,
     args: [
-      `--remote-debugging-port=${config.chromeRemoteDebugPort}`,
-      `--user-data-dir=${config.chromeUserDataDir}`
+      `--remote-debugging-port=${config.chromeRemoteDebugPort}`
     ]
   });
 
-  const context = await browser.newContext({ ignoreHTTPSErrors: true });
-  const page = await context.newPage();
+  const page = context.pages()[0] || await context.newPage();
+  const browser = context.browser();
+  if (!browser) {
+    throw new Error('Failed to resolve browser instance from persistent context.');
+  }
 
   info('Chrome launched successfully');
   return { browser, context, page };
@@ -90,7 +108,12 @@ export async function connectToBrowser(config: AutomationConfig): Promise<Browse
     const context = browser.contexts()[0] || (await browser.newContext({ ignoreHTTPSErrors: true }));
     const existingPages = context.pages();
 
-    const blankPage = existingPages.find((p) => {
+    const relevantPage = existingPages.find((p: any) => {
+      const url = p.url();
+      return /https?:\/\/(.*\.)?(usvisascheduling\.com|b2clogin\.com)/i.test(url);
+    });
+
+    const blankPage = existingPages.find((p: any) => {
       const url = p.url();
       return (
         !url ||
@@ -101,18 +124,15 @@ export async function connectToBrowser(config: AutomationConfig): Promise<Browse
       );
     });
 
-    const activePage = existingPages.find((p) => {
-      const url = p.url();
-      return url && url !== 'about:blank' && !url.startsWith('chrome://') && !url.startsWith('edge://');
-    });
-
-    const page = blankPage || activePage || existingPages[0] || (await context.newPage());
+    const page = relevantPage || blankPage || (await context.newPage());
 
     const selectedUrl = page.url();
-    if (blankPage && page === blankPage) {
+    if (relevantPage && page === relevantPage) {
+      info('Connected to existing Chrome CDP session using relevant site tab:', selectedUrl);
+    } else if (blankPage && page === blankPage) {
       info('Connected to existing Chrome CDP session using a blank tab.');
     } else {
-      info('Connected to existing Chrome CDP session using existing tab:', selectedUrl);
+      info('Connected to existing Chrome CDP session using a new tab:', selectedUrl);
     }
 
     return { browser, context, page, existing: true };

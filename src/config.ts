@@ -54,6 +54,8 @@ export type AutomationConfig = {
   useCamoufox: boolean;
   autoSolveCloudflare: boolean;
   headless: boolean;
+  alertOnMajorEvents: boolean;
+  screenshotAfterSelection: boolean;
 };
 
 const configFile = path.resolve(process.cwd(), 'config.local.json');
@@ -92,6 +94,33 @@ function parseBoolean(value: unknown, fallback: boolean) {
   return fallback;
 }
 
+function looksLikePlaceholder(value: string) {
+  const normalized = value.trim().toLowerCase();
+  return (
+    normalized === '' ||
+    normalized.includes('your_username') ||
+    normalized.includes('your_password') ||
+    normalized.includes('<tenant>') ||
+    normalized.includes('...')
+  );
+}
+
+function isLikelyAuthFlowUrl(value: string) {
+  try {
+    const parsed = new URL(value);
+    const host = parsed.hostname.toLowerCase();
+    const path = parsed.pathname.toLowerCase();
+    return (
+      host.includes('usvisascheduling.com') ||
+      host.includes('b2clogin.com') ||
+      path.includes('/oauth2/') ||
+      path.includes('/authorize')
+    );
+  } catch {
+    return false;
+  }
+}
+
 function loadLocalConfig(): Partial<AutomationConfig> {
   if (!fs.existsSync(configFile)) {
     return {};
@@ -122,9 +151,19 @@ export function loadConfig(): AutomationConfig {
       local.appointment?.preferredTime ?? env.APPOINTMENT_PREFERRED_TIME ?? null
   };
 
-  const securityQuestions =
-    local.securityQuestions ||
-    (env.SECURITY_QUESTIONS ? JSON.parse(env.SECURITY_QUESTIONS) : []);
+  let parsedSecurityQuestions: SecurityQuestionConfig[] = [];
+  if (Array.isArray(local.securityQuestions)) {
+    parsedSecurityQuestions = local.securityQuestions;
+  } else if (env.SECURITY_QUESTIONS) {
+    try {
+      const candidate = JSON.parse(env.SECURITY_QUESTIONS);
+      if (Array.isArray(candidate)) {
+        parsedSecurityQuestions = candidate;
+      }
+    } catch {
+      parsedSecurityQuestions = [];
+    }
+  }
 
   const config: AutomationConfig = {
     authUrl: local.authUrl || env.AUTH_URL || '',
@@ -132,7 +171,7 @@ export function loadConfig(): AutomationConfig {
       local.scheduleUrl || env.SCHEDULE_URL || 'https://www.usvisascheduling.com/en-US/ofc-schedule/',
     username: local.username || env.USERNAME || '',
     password: local.password || env.PASSWORD || '',
-    securityQuestions,
+    securityQuestions: parsedSecurityQuestions,
     appointment,
     chromeExecutable:
       local.chromeExecutable || env.CHROME_EXECUTABLE || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
@@ -153,15 +192,27 @@ export function loadConfig(): AutomationConfig {
     autoSolveCloudflare:
       parseBoolean(local.autoSolveCloudflare ?? env.AUTO_SOLVE_CLOUDFLARE, false),
     headless:
-      parseBoolean(local.headless ?? env.HEADLESS, false)
+      parseBoolean(local.headless ?? env.HEADLESS, false),
+    alertOnMajorEvents:
+      parseBoolean((local as any).alertOnMajorEvents ?? env.ALERT_ON_MAJOR_EVENTS, true),
+    screenshotAfterSelection:
+      parseBoolean((local as any).screenshotAfterSelection ?? env.SCREENSHOT_AFTER_SELECTION, true)
   };
 
   if (!config.authUrl) {
     throw new Error('Missing authUrl. Set AUTH_URL or config.local.json authUrl.');
   }
 
+  if (looksLikePlaceholder(config.authUrl) || !isLikelyAuthFlowUrl(config.authUrl)) {
+    throw new Error('authUrl must be a real usvisascheduling or B2C login URL, not an example placeholder.');
+  }
+
   if (!config.username || !config.password) {
     throw new Error('Missing credentials. Set USERNAME/PASSWORD or config.local.json.');
+  }
+
+  if (looksLikePlaceholder(config.username) || looksLikePlaceholder(config.password)) {
+    throw new Error('username/password in config.local.json still use placeholder values. Replace them with real credentials.');
   }
 
   const appointmentCity = config.appointment.city;

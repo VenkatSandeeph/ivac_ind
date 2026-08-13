@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IVAC Launcher</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div class="container">
+    <div class="topbar">
+      <div class="title">IVAC Automation Launcher</div>
+      <div id="status" class="badge stopped">Stopped</div>
+    </div>
+
+    <div class="main">
+      <section class="panel">
+        <h2>Config</h2>
+        <p>
+          Runtime file: <span id="configPath"></span>
+        </p>
+        <p>
+          Chrome debug status: <span id="chromeStatusText">Unknown</span>
+        </p>
+        <div class="actions">
+          <button id="saveConfig">Save Config</button>
+          <button id="reloadConfig">Reload Config</button>
+          <button id="validateConfig">Validate Config</button>
+          <button id="connectChrome">Connect Chrome</button>
+          <button id="start" class="primary">Start</button>
+          <button id="stop" class="danger" disabled>Stop</button>
+        </div>
+        <textarea id="configEditor" spellcheck="false"></textarea>
+      </section>
+
+      <section class="panel">
+        <h2>Logs</h2>
+        <p>Live stdout/stderr from Node running dist/index.js</p>
+        <div></div>
+        <pre id="logBox"></pre>
+      </section>
+    </div>
+  </div>
+
+  <script src="./renderer.js"></script>
+</body>
+</html>

@@ -4,11 +4,9 @@ import os from 'os';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { warn, info } from './logger';
 
-// Hard-coded Supabase credentials (set them here to embed in the script).
-// WARNING: Storing secrets in source code is insecure. Replace the KEY
-// value below with your actual Supabase key if you insist on hardcoding.
-const HARD_CODED_SUPABASE_URL = 'https://ptgvkfawdwgwlrpuowjk.supabase.co';
-const HARD_CODED_SUPABASE_KEY = 'ptgvkfawdwgwlrpuowjk';
+// Intentionally hard-coded credentials.
+const HARD_CODED_SUPABASE_URL: string = 'https://ptgvkfawdwgwlrpuowjk.supabase.co';
+const HARD_CODED_SUPABASE_KEY: string = 'sb_publishable_BpwV8vJS8RkVAlgayjlK1g_JSED4oLE';
 
 let client: SupabaseClient | null = null;
 
@@ -32,7 +30,7 @@ function initClientIfNeeded() {
   const key = HARD_CODED_SUPABASE_KEY || process.env.SUPABASE_KEY || local.key || '';
 
   if (!url || !key || key === 'REPLACE_WITH_YOUR_SUPABASE_KEY') {
-    warn('Supabase URL or Key not configured (hard-coded key missing); event logging disabled');
+    warn('Supabase URL or Key not configured; event logging disabled');
     return null;
   }
 

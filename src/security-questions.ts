@@ -1,4 +1,4 @@
-import { Page, Locator } from 'playwright';
+import type { Page, Locator } from 'playwright';
 import { SecurityQuestionConfig } from './config';
 import { info, warn } from './logger';
 

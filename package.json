@@ -6,7 +6,9 @@
   "scripts": {
     "start": "tsx src/index.ts",
     "build": "tsc -p tsconfig.json",
-    "build:exe": "npm run build && npx @yao-pkg/pkg -t node18-win-x64 -o dist/IVAC.exe dist/index.js",
+    "build:exe": "npm run build && npx @yao-pkg/pkg --public --public-packages \"*\" -t node24-win-x64 -o dist/ivac.exe dist/index.js",
+    "build:release": "npm run build:exe && copy /Y config.example.json dist\\config.local.json",
+    "ui:start": "electron ui/main.js",
     "prepare": "playwright install chromium"
   },
   "dependencies": {
@@ -18,7 +20,14 @@
   "devDependencies": {
     "@types/node": "^26.2.0",
     "@yao-pkg/pkg": "^6.22.0",
+    "electron": "^32.0.1",
     "tsx": "^4.23.11",
     "typescript": "^5.9.3"
+  },
+  "pkg": {
+    "assets": [
+      "node_modules/playwright/node_modules/playwright-core/browsers.json",
+      "node_modules/playwright-core/browsers.json"
+    ]
   }
 }

@@ -1,4 +1,4 @@
-import { Page, Response } from 'playwright';
+import type { Page, Response } from 'playwright';
 import { warn, info } from './logger';
 
 export type ScheduleApiResult = {

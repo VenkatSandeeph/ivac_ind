@@ -1,0 +1,157 @@
+:root {
+  --bg: #f6f4ef;
+  --panel: #fffdf8;
+  --ink: #1e1a16;
+  --muted: #6e665e;
+  --accent: #176f58;
+  --warn: #9d2f2f;
+  --border: #d9d2c7;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Segoe UI", Tahoma, sans-serif;
+  color: var(--ink);
+  background: radial-gradient(circle at top right, #efe8dd 0%, var(--bg) 55%);
+}
+
+.container {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  height: 100vh;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.title {
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.badge {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 12px;
+  padding: 6px 10px;
+  background: #fff;
+}
+
+.badge.running {
+  color: #0f5c49;
+  border-color: #7bb9a8;
+  background: #ecfaf5;
+}
+
+.badge.stopped {
+  color: #6f1f1f;
+  border-color: #caa7a7;
+  background: #fff2f2;
+}
+
+.main {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  padding: 14px;
+  min-height: 0;
+}
+
+.panel {
+  display: grid;
+  grid-template-rows: auto auto 1fr;
+  gap: 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px;
+  min-height: 0;
+}
+
+.panel h2 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.panel p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+button {
+  border: 1px solid var(--border);
+  background: #fff;
+  color: var(--ink);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+button.danger {
+  background: var(--warn);
+  border-color: var(--warn);
+  color: #fff;
+}
+
+button.success {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+textarea,
+pre {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ink);
+  padding: 10px;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow: auto;
+}
+
+#configPath {
+  font-family: Consolas, "Courier New", monospace;
+  color: #2e5d96;
+}
+
+@media (max-width: 980px) {
+  .main {
+    grid-template-columns: 1fr;
+  }
+}
