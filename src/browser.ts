@@ -31,7 +31,6 @@ export type BrowserConnection = BrowserLaunch & {
   existing: boolean;
 };
 
-// Camoufox support removed.
 
 export async function launchBrowser(config: AutomationConfig): Promise<BrowserLaunch> {
   info('Launching Chrome with remote debugging');

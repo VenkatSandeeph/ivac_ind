@@ -189,7 +189,6 @@ export function loadConfig(): AutomationConfig {
       parseNumber(local.cloudflareWaitMs ?? env.CLOUDFLARE_WAIT_MS, 180000),
     debugNetwork:
       parseBoolean(local.debugNetwork ?? env.DEBUG_NETWORK, false),
-    // `useCamoufox` removed.
     autoSolveCloudflare:
       parseBoolean(local.autoSolveCloudflare ?? env.AUTO_SOLVE_CLOUDFLARE, false),
     headless:
