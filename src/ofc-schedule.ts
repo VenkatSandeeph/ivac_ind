@@ -145,7 +145,7 @@ export async function navigateToOfcSchedule(page: Page, scheduleUrl: string) {
   info('OFC Schedule page loaded successfully');
 }
 
-export async function selectCity(page: Page, city: string) {
+export async function selectCity(page: Page, city: string, skipEmpty = false) {
   const options = await getCityOptions(page);
   const normalizedTarget = city.trim().toLowerCase();
   const targetOption = options.find((option) => option.text.trim().toLowerCase() === normalizedTarget);
@@ -155,7 +155,7 @@ export async function selectCity(page: Page, city: string) {
   }
 
   const emptyOption = options.find((option) => option.isEmpty);
-  if (emptyOption) {
+  if (emptyOption && !skipEmpty) {
     info('Selecting empty city value before target city to trigger schedule refresh');
     await dispatchSelectValue(page, citySelectSelector, emptyOption.value);
     await randomDelay(500);
@@ -404,7 +404,7 @@ export async function submitAppointment(page: Page) {
 
     await Promise.all([
       page.waitForNavigation({ waitUntil: 'networkidle', timeout: 60000 }).catch(() => null),
-      button.click()
+    //  button.click()
     ]);
     const elapsedMs = Date.now() - submitStart;
     info(`Submit button clicked and navigation completed in ${elapsedMs}ms`);

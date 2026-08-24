@@ -1,0 +1,1 @@
+const fs=require('fs');const s=fs.readFileSync('src/index.ts','utf8');const lines=s.split('\n');let bal=0;for(let i=0;i<lines.length;i++){const line=lines[i];for(const ch of line){if(ch==='{') bal++; else if(ch==='}') bal--; } if(i>=248 && i<780){console.log((i+1).toString().padStart(4), bal, ' |', line.trim());} }console.log('final bal',bal);

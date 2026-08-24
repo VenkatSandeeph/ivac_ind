@@ -15,4 +15,8 @@ contextBridge.exposeInMainWorld('ivacApi', {
   onStatus: (handler) => {
     ipcRenderer.on('automation:status', (_event, status) => handler(status));
   }
+  ,
+  onChromeStatus: (handler) => {
+    ipcRenderer.on('chrome:status', (_event, status) => handler(status));
+  }
 });

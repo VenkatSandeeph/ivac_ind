@@ -28,16 +28,9 @@ Operational guidance
 - Run with `DEBUG` or `--debug-network` enabled to capture request/response logs.
 - Use small jitter (`randomDelay`) on UI interactions to avoid deterministic patterns.
 - Configure `maxDateAttempts` and `getCityRefreshDelayMs` to tune retry aggressiveness.
-- For the most robust browser fingerprint, enable `useCamoufox` and run in headed mode.
 - If Cloudflare Turnstile appears, enable `autoSolveCloudflare` to let the script attempt a humanized click via `ghost-cursor`.
 - The script also detects inline checkbox challenges and fallback page-level verification text, not just iframe-based Turnstile frames.
 - `submitAppointment` waits for the submit button to become enabled before clicking, avoiding fixed delays and improving responsiveness.
-
-Camoufox + Ghost-Cursor support
-- `useCamoufox`: launches a hardened Firefox build instead of Chrome. This helps reduce automation fingerprint leaks such as `navigator.webdriver`, canvas/WebGL anomalies, and other browser-injection signals.
-- `autoSolveCloudflare`: when enabled, the Cloudflare helper will try to locate the Turnstile iframe, then use `ghost-cursor` to perform a human-like click on the checkbox target.
-- This is best used in headed mode, since headed browsers provide more natural telemetry than headless mode.
-- Keep the browser window unobstructed and do not move the physical mouse while the script is executing.
 
 Files to update when behavior changes
 - `ARCHITECTURE.md` — this file

@@ -1,8 +1,11 @@
 import path from 'path';
+import fs from 'fs';
+import { spawn } from 'child_process';
 import type { Browser, BrowserContext, Page } from 'playwright';
 import { info, warn } from './logger';
 import type { AutomationConfig } from './config';
 import { waitForPortOpen } from './utils';
+import os from 'os';
 
 function loadPlaywrightRuntime() {
   const runtimeRequire = eval('require') as NodeRequire;
@@ -28,46 +31,9 @@ export type BrowserConnection = BrowserLaunch & {
   existing: boolean;
 };
 
-async function launchCamoufox(config: AutomationConfig): Promise<BrowserLaunch> {
-  info('Launching Camoufox stealth browser in headed mode');
-  const camoufoxModule = (await import('camoufox-js')) as any;
-  const browser = await camoufoxModule.Camoufox({
-    headless: false,
-    user_data_dir: config.chromeUserDataDir,
-    args: ['--start-maximized'],
-  });
-
-  info('Camoufox launch returned browser object', {
-    type: typeof browser,
-    hasNewContext: typeof browser?.newContext,
-    hasNewPage: typeof browser?.newPage,
-    hasContexts: typeof browser?.contexts,
-  });
-
-  let context: BrowserContext;
-  if (typeof browser?.newContext === 'function') {
-    context = await browser.newContext({
-      ignoreHTTPSErrors: true,
-      viewport: { width: 1280, height: 720 },
-      screen: { width: 1920, height: 1080 },
-    });
-  } else if (typeof browser?.contexts === 'function') {
-    const contexts = await browser.contexts();
-    context = contexts[0] || (await (browser as any).newContext({ ignoreHTTPSErrors: true }));
-  } else {
-    throw new Error('Camoufox browser object does not support newContext or contexts.');
-  }
-  const page = await context.newPage();
-
-  info('Camoufox launched successfully');
-  return { browser, context, page };
-}
+// Camoufox support removed.
 
 export async function launchBrowser(config: AutomationConfig): Promise<BrowserLaunch> {
-  if (config.useCamoufox) {
-    return await launchCamoufox(config);
-  }
-
   info('Launching Chrome with remote debugging');
 
   const context = await chromium.launchPersistentContext(config.chromeUserDataDir, {
@@ -90,17 +56,54 @@ export async function launchBrowser(config: AutomationConfig): Promise<BrowserLa
 }
 
 export async function connectToBrowser(config: AutomationConfig): Promise<BrowserConnection | null> {
-  if (config.useCamoufox) {
-    warn('Camoufox mode enabled; skipping existing Chrome CDP reconnection.');
-    return null;
-  }
+  // Attempt to connect to an existing Chrome CDP endpoint, launching
+  // a local Chrome instance if necessary.
   const endpoint = `http://127.0.0.1:${config.chromeRemoteDebugPort}`;
   info('Attempting to connect to existing Chrome CDP endpoint:', endpoint);
 
-  const portReady = await waitForPortOpen(config.chromeRemoteDebugPort, 5000);
+  let portReady = await waitForPortOpen(config.chromeRemoteDebugPort, 10000);
   if (!portReady) {
     warn('Chrome CDP endpoint is not reachable on port', config.chromeRemoteDebugPort);
-    return null;
+    // Attempt to launch Chrome with the configured executable and user-data-dir.
+    try {
+      const localChromeDebug = path.join(process.cwd(), 'chrome-debug');
+
+      if (!fs.existsSync(localChromeDebug)) {
+        if (fs.existsSync(config.chromeUserDataDir)) {
+          try {
+            fs.cpSync(config.chromeUserDataDir, localChromeDebug, { recursive: true });
+            info('Copied chrome user-data from', config.chromeUserDataDir, 'to', localChromeDebug);
+          } catch (err) {
+            warn('Failed to copy existing chrome user-data-dir, creating empty dir instead:', String(err));
+            fs.mkdirSync(localChromeDebug, { recursive: true });
+          }
+        } else {
+          fs.mkdirSync(localChromeDebug, { recursive: true });
+        }
+      }
+
+      const chromeExe = config.chromeExecutable || 'chrome';
+      const args = [
+        `--remote-debugging-port=${config.chromeRemoteDebugPort}`,
+        `--user-data-dir=${localChromeDebug}`,
+        '--no-first-run',
+        '--no-default-browser-check'
+      ];
+
+      info(`Launching Chrome: ${chromeExe} ${args.join(' ')}`);
+      const child = spawn(chromeExe, args, { detached: true, stdio: 'ignore' });
+      child.unref();
+
+      // Wait a bit for Chrome to start and open the port.
+      portReady = await waitForPortOpen(config.chromeRemoteDebugPort, 15000);
+      if (!portReady) {
+        warn('Chrome did not open CDP port after launch.');
+        return null;
+      }
+    } catch (err) {
+      warn('Failed to launch Chrome automatically:', err instanceof Error ? err.message : String(err));
+      return null;
+    }
   }
 
   try {
@@ -141,4 +144,55 @@ export async function connectToBrowser(config: AutomationConfig): Promise<Browse
     warn('Failed to connect to existing CDP session:', message);
     return null;
   }
+}
+
+export async function ensureChromeRunning(config: AutomationConfig): Promise<boolean> {
+  const port = config.chromeRemoteDebugPort;
+  if (await waitForPortOpen(port, 1000)) return true;
+
+  const candidates = [
+    config.chromeExecutable,
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+    'chrome'
+  ].filter(Boolean) as string[];
+
+  const localChromeDebug = path.join(process.cwd(), 'chrome-debug');
+  if (!fs.existsSync(localChromeDebug)) {
+    if (fs.existsSync(config.chromeUserDataDir)) {
+      try {
+        fs.cpSync(config.chromeUserDataDir, localChromeDebug, { recursive: true });
+        info('Copied chrome user-data to', localChromeDebug);
+      } catch (err) {
+        warn('Could not copy chrome user-data-dir, creating empty one instead:', String(err));
+        fs.mkdirSync(localChromeDebug, { recursive: true });
+      }
+    } else {
+      fs.mkdirSync(localChromeDebug, { recursive: true });
+    }
+  }
+
+  for (const exe of candidates) {
+    try {
+      info(`Attempting to launch Chrome executable: ${exe}`);
+      const args = [
+        `--remote-debugging-port=${port}`,
+        `--user-data-dir=${localChromeDebug}`,
+        '--no-first-run',
+        '--no-default-browser-check'
+      ];
+      const child = spawn(exe, args, { detached: true, stdio: 'ignore' });
+      child.unref();
+
+      const opened = await waitForPortOpen(port, 10000);
+      if (opened) {
+        info('Chrome CDP port opened after launching', exe);
+        return true;
+      }
+    } catch (err) {
+      warn('Failed launching Chrome with', exe, String(err));
+    }
+  }
+
+  return false;
 }

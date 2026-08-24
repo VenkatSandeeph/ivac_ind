@@ -49,9 +49,9 @@ export type AutomationConfig = {
   chromeRemoteDebugPort: number;
   maxSlotAttempts: number;
   slotRetryDelayMs: number;
+  cityRetrySeconds?: number;
   cloudflareWaitMs: number;
   debugNetwork: boolean;
-  useCamoufox: boolean;
   autoSolveCloudflare: boolean;
   headless: boolean;
   alertOnMajorEvents: boolean;
@@ -183,12 +183,13 @@ export function loadConfig(): AutomationConfig {
       parseNumber(local.maxSlotAttempts ?? env.MAX_SLOT_ATTEMPTS, 10),
     slotRetryDelayMs:
       parseNumber(local.slotRetryDelayMs ?? env.SLOT_RETRY_DELAY_MS, 10000),
+    cityRetrySeconds:
+      parseNumber((local as any).cityRetrySeconds ?? env.CITY_RETRY_SECONDS, 10),
     cloudflareWaitMs:
       parseNumber(local.cloudflareWaitMs ?? env.CLOUDFLARE_WAIT_MS, 180000),
     debugNetwork:
       parseBoolean(local.debugNetwork ?? env.DEBUG_NETWORK, false),
-    useCamoufox:
-      parseBoolean(local.useCamoufox ?? env.USE_CAMOUFOX, false),
+    // `useCamoufox` removed.
     autoSolveCloudflare:
       parseBoolean(local.autoSolveCloudflare ?? env.AUTO_SOLVE_CLOUDFLARE, false),
     headless:

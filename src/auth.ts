@@ -199,39 +199,74 @@ export async function login(page: Page, config: AutomationConfig) {
     throw new Error('Password field was not found on login page.');
   }
 
-  await usernameField.waitFor({ state: 'visible', timeout: 30000 });
-  await fillFieldWithHumanDelay(page, usernameField, config.username);
+  // Attempt submission with retries: sometimes the site shows a "Sign in" button
+  // on an intermediate error page; click it to return to the login form and retry.
+  const maxAttempts = 3;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    await usernameField.waitFor({ state: 'visible', timeout: 30000 });
+    await fillFieldWithHumanDelay(page, usernameField, config.username);
 
-  await passwordField.waitFor({ state: 'visible', timeout: 30000 });
-  await fillFieldWithHumanDelay(page, passwordField, config.password);
+    await passwordField.waitFor({ state: 'visible', timeout: 30000 });
+    await fillFieldWithHumanDelay(page, passwordField, config.password);
 
-  if ((await signInButton.count()) === 0) {
-    const fallbackButton = page.getByRole('button', { name: /sign in|log in|continue|next/i });
-    if ((await fallbackButton.count()) === 0) {
+    const submitButton = (await signInButton.count()) === 0
+      ? page.getByRole('button', { name: /sign in|log in|continue|next/i })
+      : signInButton;
+
+    if ((await submitButton.count()) === 0) {
       throw new Error('Sign In button was not found on login page.');
     }
-    await fallbackButton.waitFor({ state: 'visible', timeout: 30000 });
-    await Promise.all([
-      page.waitForNavigation({ waitUntil: 'networkidle', timeout: 60000 }).catch(() => null),
-      fallbackButton.click()
-    ]);
-  } else {
-    await signInButton.waitFor({ state: 'visible', timeout: 30000 });
-    await Promise.all([
-      page.waitForNavigation({ waitUntil: 'networkidle', timeout: 60000 }).catch(() => null),
-      signInButton.click()
-    ]);
-  }
 
-  // After submitting, check whether the page shows a credential error message
-  const credError = await firstMatchingLocator(page, ['#claimVerificationServerError', 'div.error.pageLevel']);
-  if (credError) {
-    const visible = await credError.isVisible().catch(() => false);
-    const text = (await credError.textContent().catch(() => '')) || '';
-    if (visible && /username|password|invalid/i.test(text)) {
-      warn('Credentials are not correct according to page message. Aborting.');
-      throw new Error('Invalid credentials detected on login page');
+    await submitButton.waitFor({ state: 'visible', timeout: 30000 });
+    await Promise.all([
+      page.waitForNavigation({ waitUntil: 'networkidle', timeout: 60000 }).catch(() => null),
+      submitButton.click()
+    ]);
+
+    // After submitting, check whether the page shows a credential error message
+    const credError = await firstMatchingLocator(page, ['#claimVerificationServerError', 'div.error.pageLevel']);
+    if (credError) {
+      const visible = await credError.isVisible().catch(() => false);
+      const text = (await credError.textContent().catch(() => '')) || '';
+      if (visible && /username|password|invalid/i.test(text)) {
+        warn('Credentials are not correct according to page message. Aborting.');
+        throw new Error('Invalid credentials detected on login page');
+      }
     }
+
+    // Detect an intermediate page that shows a Sign in / Signin link/button
+    const signInAgain = await firstMatchingLocator(page, [
+      'button:has-text("Sign In")',
+      'button:has-text("Sign in")',
+      'a:has-text("Sign In")',
+      'a:has-text("Sign in")',
+      'button:has-text("Signin")'
+    ]);
+
+    if (signInAgain && (await signInAgain.isVisible().catch(() => false))) {
+      info('Detected intermediate Sign in button after submit; clicking to return to login and retry', { attempt });
+      try {
+        await Promise.all([
+          page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => null),
+          signInAgain.click()
+        ]);
+      } catch (_e) {
+        // ignore click/navigation failures and attempt to continue
+      }
+
+      // Wait for login form to re-appear before retrying
+      try {
+        await waitForLoginPage(page, 20000);
+        // loop will retry
+        continue;
+      } catch (_err) {
+        // if login page did not render, break and fallthrough
+      }
+    }
+
+    // No intermediate sign-in prompt detected — assume submission succeeded or
+    // we should not retry further.
+    break;
   }
 
   // Fire-and-forget login event for audit/diagnostics.

@@ -64,7 +64,34 @@ export async function waitForScheduleResponse(page: Page, timeoutMs: number) {
       !payload?.HasError &&
       (scheduleDays.length > 0 || scheduleEntries.length > 0);
 
-    info('Schedule API response received', { status, available, scheduleDays: scheduleDays.length, scheduleEntries: scheduleEntries.length });
+    // Build human-readable date strings from scheduleDays / scheduleEntries when possible
+    const extractDate = (item: any) => {
+      if (typeof item === 'string') return item;
+      if (!item) return '';
+      if (item.ScheduleDate) return String(item.ScheduleDate);
+      if (item.Date) return String(item.Date);
+      if (item.CalendarDate) return String(item.CalendarDate);
+      if (item.Day) return String(item.Day);
+      // fallback: try common nested properties
+      if (item.SlotDate) return String(item.SlotDate);
+      try {
+        return JSON.stringify(item);
+      } catch {
+        return String(item);
+      }
+    };
+
+    const scheduleDayStrings = scheduleDays.map(extractDate).filter(Boolean).slice(0, 50);
+    const scheduleEntryStrings = scheduleEntries.map(extractDate).filter(Boolean).slice(0, 50);
+
+    info('Schedule API response received', {
+      status,
+      available,
+      scheduleDays: scheduleDays.length,
+      scheduleEntries: scheduleEntries.length,
+      scheduleDaySamples: scheduleDayStrings,
+      scheduleEntrySamples: scheduleEntryStrings
+    });
 
     return {
       response,

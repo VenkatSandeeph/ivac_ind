@@ -145,6 +145,14 @@ pre {
   overflow: auto;
 }
 
+/* Ensure the logs area expands and logs flow top-to-bottom */
+#logBox {
+  display: block;
+  height: 100%;
+  overflow-y: auto;
+  white-space: pre-wrap;
+}
+
 #configPath {
   font-family: Consolas, "Courier New", monospace;
   color: #2e5d96;

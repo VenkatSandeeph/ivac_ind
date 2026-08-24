@@ -6,6 +6,8 @@ const path = require('path');
 
 let mainWindow = null;
 let automationProcess = null;
+let chromeCheckInterval = null;
+let lastChromeStatus = null;
 
 const projectRoot = path.resolve(__dirname, '..');
 const distDir = path.join(projectRoot, 'dist');
@@ -163,6 +165,8 @@ function checkChromeConnection(port) {
   });
 }
 
+// (checkChromeAndNotify is implemented later and will be used when automation is running)
+
 function sendLog(message) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   mainWindow.webContents.send('automation:log', message);
@@ -174,8 +178,11 @@ function ensureDistConfig() {
   }
 
   if (!fs.existsSync(configPath)) {
+    const localPath = path.join(projectRoot, 'config.local.json');
     const examplePath = path.join(projectRoot, 'config.example.json');
-    if (fs.existsSync(examplePath)) {
+    if (fs.existsSync(localPath)) {
+      fs.copyFileSync(localPath, configPath);
+    } else if (fs.existsSync(examplePath)) {
       fs.copyFileSync(examplePath, configPath);
     } else {
       fs.writeFileSync(configPath, '{}', 'utf8');
@@ -200,6 +207,32 @@ function createWindow() {
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
+}
+
+
+async function checkChromeAndNotify() {
+  try {
+    ensureDistConfig();
+    const cfg = JSON.parse(fs.readFileSync(configPath, 'utf8') || '{}');
+    const port = Number(cfg.chromeRemoteDebugPort || 9222);
+    const status = await checkChromeConnection(port);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      const short = { connected: !!status.connected, message: String(status.message || '') };
+      if (JSON.stringify(short) !== JSON.stringify(lastChromeStatus)) {
+        mainWindow.webContents.send('chrome:status', status);
+        lastChromeStatus = short;
+      }
+    }
+  } catch (err) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      const status = { connected: false, message: String(err) };
+      const short = { connected: false, message: String(err) };
+      if (JSON.stringify(short) !== JSON.stringify(lastChromeStatus)) {
+        mainWindow.webContents.send('chrome:status', status);
+        lastChromeStatus = short;
+      }
+    }
+  }
 }
 
 function startAutomation() {
@@ -247,6 +280,16 @@ function startAutomation() {
     }
   });
 
+  // No automatic Chrome polling here; UI-triggered `chrome:connect` will run checks on demand.
+  // Start periodic Chrome checks while automation is running so the UI stays up-to-date
+  if (chromeCheckInterval) {
+    clearInterval(chromeCheckInterval);
+    chromeCheckInterval = null;
+  }
+  chromeCheckInterval = setInterval(() => {
+    checkChromeAndNotify().catch(() => null);
+  }, 30000);
+
   return { running: true };
 }
 
@@ -258,6 +301,10 @@ function stopAutomation() {
   const pid = automationProcess.pid;
   const killed = automationProcess.kill();
   sendLog(`[launcher] Stop requested for PID ${pid}; kill=${killed}`);
+  if (chromeCheckInterval) {
+    clearInterval(chromeCheckInterval);
+    chromeCheckInterval = null;
+  }
   return { running: !!automationProcess };
 }
 
@@ -301,7 +348,49 @@ ipcMain.handle('chrome:connect', async (_event, content) => {
   }
 
   const port = Number(validation.parsed.chromeRemoteDebugPort || 9222);
-  return checkChromeConnection(port);
+  const status = await checkChromeConnection(port);
+  if (status.connected) return status;
+
+  // If not connected, attempt to launch Chrome from the UI using the configured executable
+  try {
+    const localChromeDebug = path.join(distDir, 'chrome-debug');
+    if (!fs.existsSync(localChromeDebug)) {
+      if (fs.existsSync(validation.parsed.chromeUserDataDir)) {
+        try {
+          fs.cpSync(validation.parsed.chromeUserDataDir, localChromeDebug, { recursive: true });
+        } catch (err) {
+          try { fs.mkdirSync(localChromeDebug, { recursive: true }); } catch (e) {}
+        }
+      } else {
+        fs.mkdirSync(localChromeDebug, { recursive: true });
+      }
+    }
+
+    const chromeExe = validation.parsed.chromeExecutable || 'chrome';
+    const args = [
+      `--remote-debugging-port=${port}`,
+      `--user-data-dir=${localChromeDebug}`,
+      '--no-first-run',
+      '--no-default-browser-check'
+    ];
+    sendLog(`[launcher] Launching Chrome from UI: ${chromeExe} ${args.join(' ')}`);
+    const child = spawn(chromeExe, args, { detached: true, stdio: 'ignore' });
+    try { child.unref(); } catch (e) {}
+
+    // wait for endpoint to come up (max 10s)
+    const start = Date.now();
+    while (Date.now() - start < 10000) {
+      // eslint-disable-next-line no-await-in-loop
+      const now = await checkChromeConnection(port);
+      if (now.connected) return now;
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+
+    return { connected: false, message: 'Chrome did not open CDP port after launch.' };
+  } catch (err) {
+    return { connected: false, message: `Failed to launch Chrome: ${String(err)}` };
+  }
 });
 
 ipcMain.handle('config:path', async () => {
@@ -320,6 +409,11 @@ ipcMain.handle('config:openFolder', async () => {
 app.whenReady().then(() => {
   createWindow();
 
+  // Do an initial Chrome status check to update the UI
+  checkChromeAndNotify().catch(() => null);
+
+  // No background Chrome checks until automation is started.
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
@@ -330,6 +424,10 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
   if (automationProcess) {
     automationProcess.kill();
+  }
+  if (chromeCheckInterval) {
+    clearInterval(chromeCheckInterval);
+    chromeCheckInterval = null;
   }
   if (process.platform !== 'darwin') {
     app.quit();

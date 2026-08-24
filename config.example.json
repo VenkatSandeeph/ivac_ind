@@ -32,7 +32,6 @@
   "slotRetryDelayMs": 10000,
   "cloudflareWaitMs": 180000,
   "debugNetwork": false,
-  "useCamoufox": false,
   "autoSolveCloudflare": false,
   "headless": false,
   "alertOnMajorEvents": true,
