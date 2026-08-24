@@ -4,3 +4,5 @@ dist/
 config.local.json
 artifacts/
 cloudflare-recordings.json
+chrome-debug/
+ui/*.js
