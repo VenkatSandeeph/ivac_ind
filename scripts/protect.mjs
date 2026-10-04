@@ -1,5 +1,4 @@
 import { build } from "esbuild";
-import JavaScriptObfuscator from "javascript-obfuscator";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -10,7 +9,54 @@ const protectedDir = path.join(root, "protected");
 fs.rmSync(protectedDir, { recursive: true, force: true });
 fs.mkdirSync(protectedDir, { recursive: true });
 
-console.log("1. Bundling TypeScript application...");
+// Shim for node:inspector — pkg strips this built-in from the compiled binary,
+// but patchright-core requires it at module init time. This stub satisfies
+// the require("inspector") call with harmless no-ops.
+const inspectorShimBanner = `
+if (typeof process.pkg !== 'undefined') {
+  var _Module = require('module');
+  var _origResolve = _Module._resolveFilename;
+  _Module._resolveFilename = function(request) {
+    if (request === 'inspector' || request === 'node:inspector') return 'pkg-inspector-shim';
+    return _origResolve.apply(this, arguments);
+  };
+  require.cache['pkg-inspector-shim'] = {
+    id: 'pkg-inspector-shim', filename: 'pkg-inspector-shim', loaded: true,
+    exports: {
+      Session: function Session() {
+        this.connect = function() {};
+        this.post = function(_m, _p, cb) { if (cb) cb(); };
+        this.disconnect = function() {};
+        this.on = function() {};
+      },
+      open: function() {},
+      close: function() {},
+      url: function() { return undefined; },
+      console: { log: function() {}, warn: function() {}, error: function() {} }
+    }
+  };
+}
+`;
+
+// Protection strategy:
+// - esbuild minification (minifySyntax + minifyWhitespace + mangling) shortens
+//   variable names and compacts the code. This is Playwright-safe because it
+//   preserves function expression boundaries and doesn't inject outer-scope
+//   references into evaluate callbacks.
+// - The primary source-code protection is the @yao-pkg/pkg native binary
+//   compilation (step 3 of the release pipeline). The source code is embedded
+//   in a V8 snapshot inside the .exe — not accessible as readable JS.
+// - javascript-obfuscator was removed because its transforms (even with
+//   stringArray disabled) break Playwright's function serialization check
+//   (new Function("(" + fn.toString() + ")") fails).
+
+console.log("1. Bundling and minifying TypeScript application...");
+
+// Build mode: 'client' (release) or 'dev' (development).
+// Injected as a compile-time constant so the logger can suppress dev logs
+// in client builds without runtime env var checks.
+const buildMode = process.env.IVAC_BUILD_MODE || "dev";
+console.log(`  Build mode: ${buildMode}`);
 
 await build({
   entryPoints: [path.join(root, "src/index.ts")],
@@ -23,14 +69,22 @@ await build({
 
   target: "node22",
 
-  outfile: path.join(protectedDir, "app.bundle.js"),
+  outfile: path.join(protectedDir, "app.js"),
 
   sourcemap: false,
 
-  minify: false,
+  minify: true,
 
-  // Keep these external for now.
-  // They will be supplied by node_modules at runtime.
+  keepNames: false,
+
+  banner: { js: inspectorShimBanner },
+
+  // Compile-time constants injected into the bundle.
+  define: {
+    "process.env.IVAC_BUILD_MODE": JSON.stringify(buildMode)
+  },
+
+  // Keep these external — supplied by node_modules at runtime.
   external: [
     "playwright",
     "playwright-core",
@@ -38,56 +92,8 @@ await build({
   ]
 });
 
-console.log("Bundle created:");
-console.log("  protected/app.bundle.js");
-
-console.log("");
-console.log("2. Obfuscating application...");
-
-const input = fs.readFileSync(
-  path.join(protectedDir, "app.bundle.js"),
-  "utf8"
-);
-
-const result = JavaScriptObfuscator.obfuscate(input, {
-  compact: true,
-
-  controlFlowFlattening: false,
-
-  deadCodeInjection: false,
-
-  stringArray: true,
-
-  stringArrayEncoding: ["base64"],
-
-  stringArrayThreshold: 0.75,
-
-  rotateStringArray: true,
-
-  identifierNamesGenerator: "hexadecimal",
-
-  renameGlobals: false,
-
-  selfDefending: false,
-
-  disableConsoleOutput: false,
-
-  sourceMap: false
-});
-
-fs.writeFileSync(
-  path.join(protectedDir, "app.js"),
-  result.getObfuscatedCode()
-);
-
-// Delete readable bundle.
-fs.rmSync(
-  path.join(protectedDir, "app.bundle.js"),
-  { force: true }
-);
-
-console.log("Protected application created:");
-console.log("  protected/app.js");
+const outSize = (fs.statSync(path.join(protectedDir, "app.js")).size / 1024).toFixed(1);
+console.log(`  protected/app.js (${outSize} KB)`);
 
 console.log("");
 console.log("Protection build completed.");

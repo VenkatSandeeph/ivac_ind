@@ -1,25 +1,24 @@
 import path from 'path';
 import fs from 'fs';
 import { spawn } from 'child_process';
-import type { Browser, BrowserContext, Page } from 'playwright';
+import type { Browser, BrowserContext, Page } from 'patchright';
 import { info, warn } from './logger';
 import type { AutomationConfig } from './config';
 import { waitForPortOpen } from './utils';
-import os from 'os';
 
-function loadPlaywrightRuntime() {
+function loadPatchrightRuntime() {
   const runtimeRequire = eval('require') as NodeRequire;
   const isPkgRuntime = typeof (process as any).pkg !== 'undefined';
 
   if (isPkgRuntime) {
-    const externalPlaywrightPath = path.resolve(process.cwd(), 'node_modules', 'playwright');
-    return runtimeRequire(externalPlaywrightPath);
+    const externalPath = path.resolve(process.cwd(), 'node_modules', 'patchright');
+    return runtimeRequire(externalPath);
   }
 
-  return runtimeRequire('playwright');
+  return runtimeRequire('patchright');
 }
 
-const { chromium } = loadPlaywrightRuntime();
+const { chromium } = loadPatchrightRuntime();
 
 export type BrowserLaunch = {
   browser: Browser;
@@ -35,13 +34,13 @@ export type BrowserConnection = BrowserLaunch & {
 export async function launchBrowser(config: AutomationConfig): Promise<BrowserLaunch> {
   info('Launching Chrome with remote debugging');
 
+  const launchArgs = [`--remote-debugging-port=${config.chromeRemoteDebugPort}`];
+
   const context = await chromium.launchPersistentContext(config.chromeUserDataDir, {
     executablePath: config.chromeExecutable,
     headless: config.headless === true,
     ignoreHTTPSErrors: true,
-    args: [
-      `--remote-debugging-port=${config.chromeRemoteDebugPort}`
-    ]
+    args: launchArgs
   });
 
   const page = context.pages()[0] || await context.newPage();
@@ -65,20 +64,10 @@ export async function connectToBrowser(config: AutomationConfig): Promise<Browse
     warn('Chrome CDP endpoint is not reachable on port', config.chromeRemoteDebugPort);
     // Attempt to launch Chrome with the configured executable and user-data-dir.
     try {
-      const localChromeDebug = path.join(process.cwd(), 'chrome-debug');
+      const localChromeDebug = config.chromeUserDataDir;
 
       if (!fs.existsSync(localChromeDebug)) {
-        if (fs.existsSync(config.chromeUserDataDir)) {
-          try {
-            fs.cpSync(config.chromeUserDataDir, localChromeDebug, { recursive: true });
-            info('Copied chrome user-data from', config.chromeUserDataDir, 'to', localChromeDebug);
-          } catch (err) {
-            warn('Failed to copy existing chrome user-data-dir, creating empty dir instead:', String(err));
-            fs.mkdirSync(localChromeDebug, { recursive: true });
-          }
-        } else {
-          fs.mkdirSync(localChromeDebug, { recursive: true });
-        }
+        fs.mkdirSync(localChromeDebug, { recursive: true });
       }
 
       const chromeExe = config.chromeExecutable || 'chrome';
@@ -156,19 +145,9 @@ export async function ensureChromeRunning(config: AutomationConfig): Promise<boo
     'chrome'
   ].filter(Boolean) as string[];
 
-  const localChromeDebug = path.join(process.cwd(), 'chrome-debug');
+  const localChromeDebug = config.chromeUserDataDir;
   if (!fs.existsSync(localChromeDebug)) {
-    if (fs.existsSync(config.chromeUserDataDir)) {
-      try {
-        fs.cpSync(config.chromeUserDataDir, localChromeDebug, { recursive: true });
-        info('Copied chrome user-data to', localChromeDebug);
-      } catch (err) {
-        warn('Could not copy chrome user-data-dir, creating empty one instead:', String(err));
-        fs.mkdirSync(localChromeDebug, { recursive: true });
-      }
-    } else {
-      fs.mkdirSync(localChromeDebug, { recursive: true });
-    }
+    fs.mkdirSync(localChromeDebug, { recursive: true });
   }
 
   for (const exe of candidates) {

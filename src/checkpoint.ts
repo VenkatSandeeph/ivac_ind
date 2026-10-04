@@ -13,10 +13,20 @@ export type RuntimeCheckpoint = {
   timestamp: string;
 };
 
-const checkpointDir = path.resolve(process.cwd(), 'artifacts', 'state');
-const checkpointPath = path.join(checkpointDir, 'checkpoint.json');
+function getProfileId(): string {
+  return process.env.IVAC_PROFILE_ID || 'default';
+}
+
+function getCheckpointDir(): string {
+  return path.resolve(process.cwd(), 'artifacts', 'state', getProfileId());
+}
+
+function getCheckpointPath(): string {
+  return path.join(getCheckpointDir(), 'checkpoint.json');
+}
 
 export function loadCheckpoint(): RuntimeCheckpoint | null {
+  const checkpointPath = getCheckpointPath();
   if (!fs.existsSync(checkpointPath)) {
     return null;
   }
@@ -31,11 +41,13 @@ export function loadCheckpoint(): RuntimeCheckpoint | null {
 }
 
 export function saveCheckpoint(checkpoint: RuntimeCheckpoint) {
+  const checkpointDir = getCheckpointDir();
   fs.mkdirSync(checkpointDir, { recursive: true });
-  fs.writeFileSync(checkpointPath, JSON.stringify(checkpoint, null, 2), 'utf8');
+  fs.writeFileSync(getCheckpointPath(), JSON.stringify(checkpoint, null, 2), 'utf8');
 }
 
 export function clearCheckpoint() {
+  const checkpointPath = getCheckpointPath();
   if (!fs.existsSync(checkpointPath)) {
     return;
   }

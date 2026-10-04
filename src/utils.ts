@@ -1,5 +1,5 @@
 import net from 'net';
-import type { Page } from 'playwright';
+import type { Page } from 'patchright';
 
 export function normalizeText(value: string): string {
   return value.replace(/\s+/g, ' ').trim().toLowerCase();

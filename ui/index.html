@@ -7,49 +7,232 @@
   <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
-  <div class="container">
+  <!-- License Screen (shown until license is validated) -->
+  <div id="licenseScreen" class="license-screen">
+    <div class="license-card">
+      <div class="license-header">
+        <h1>IVAC Automation Launcher</h1>
+        <p>Enter your license key to continue</p>
+      </div>
+      <div class="license-form">
+        <input id="licenseKeyInput" type="text" placeholder="Enter license key" autocomplete="off" spellcheck="false" />
+        <button id="licenseActivateBtn" class="primary">Activate License</button>
+      </div>
+      <div id="licenseMessage" class="license-message"></div>
+      <div id="licenseLoading" class="license-loading" style="display:none">Validating license...</div>
+    </div>
+  </div>
+
+  <!-- Main Dashboard (hidden until license is validated) -->
+  <div id="dashboardScreen" class="container" style="display:none">
     <div class="topbar">
       <div class="left-controls">
         <div class="title">IVAC Automation Launcher</div>
+        <span id="licenseBadge" class="badge license-badge"></span>
       </div>
       <div class="right-controls">
-        <div id="status" class="badge stopped">Stopped</div>
+        <label class="header-check" title="When checked, picks the least-available time slot instead of the most-available one. Applies on next profile start.">
+          <input type="checkbox" id="leastSlotsChk" /> Less Slots
+        </label>
+        <label class="header-check" title="When checked, the IP rotates automatically on blocks (403/Cloudflare). When unchecked, IP never rotates automatically — 403s cool down on the same IP and a hard IP block stops the profile. Manual Rotate IP still works. Applies on next profile start.">
+          <input type="checkbox" id="autoIpChk" checked /> Auto IP
+        </label>
+        <label class="header-check" id="specialWindowLabel" title="Experimental (dev only): when checked, profiles run only during :20–:30 and :50–:00 server-UTC windows each hour and freeze between them. Applies live to running profiles.">
+          <input type="checkbox" id="specialWindowChk" /> Special Window
+        </label>
+        <button id="rotateIpBtn" class="rotate-ip-header-btn">
+          <span class="rotate-ip-label">Rotate IP</span>
+          <span class="rotate-ip-subtext" id="currentIpDisplay">—</span>
+        </button>
+        <button id="reloadProfilesBtn">Reload</button>
+        <button id="slotPatternBtn">Slot Pattern</button>
+        <button id="addProfileBtn" class="success">Add Profile</button>
+        <button id="editProfilesBtn">Edit Profiles</button>
       </div>
+    </div>
+
+    <div id="browserClosedBanner" class="browser-closed-banner" style="display:none">
+      <span class="banner-icon">!</span>
+      <span id="browserClosedText">Browser was closed. Script has stopped. Connect Chrome and Start to resume.</span>
     </div>
 
     <div class="main">
-      <section class="panel">
-        <h2 id="configHeader">User: <span id="configUser">Unknown</span></h2>
-        <p>
-          Runtime file: <span id="configPath"></span>
-        </p>
-        <div id="appointmentDetails" class="appointment-details"></div>
-        <p>
-          Chrome debug status: <span id="chromeStatusText">Unknown</span>
-        </p>
-        <div class="actions">
-          <button id="reloadConfig">Reload Config</button>
-          <button id="panelStart" class="primary">Start</button>
-          <button id="panelStop" class="danger">Stop</button>
-          <button id="connectChrome" class="primary">Connect Chrome</button>
-        </div>
-        
-        <div class="row">
-          <label for="retryTime">Retry Time (seconds):</label>
-          <input id="retryTime" type="text" value="10" />
-          <small>Base retry per-city; actual delay = base + Random(2s)</small>
-        </div>
+      <section class="panel profile-panel">
+        <h2>Profiles</h2>
+        <div id="profileList" class="profile-list"></div>
       </section>
 
-      <section class="panel">
-        <h2>Logs</h2>
-          <p>No logs</p>
-          <div class="log-header">
-            <button id="clearLogs">Clear logs</button>
-          </div>
-            <pre id="logBox"></pre>
+      <section class="panel log-panel">
+        <div class="log-header">
+          <h2>Logs <span id="logProfileName"></span></h2>
+          <button id="clearLogs">Clear Logs</button>
+        </div>
+        <pre id="logBox"></pre>
       </section>
     </div>
+  </div>
+
+  <!-- Profile Add/Edit Modal -->
+  <div id="profileModal" class="modal" style="display:none">
+    <div class="modal-backdrop"></div>
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2 id="modalTitle">Add Profile</h2>
+        <button id="modalClose" class="close-btn">&times;</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="pId" />
+        <input type="hidden" id="pInstanceIndex" />
+
+        <h3>Credentials</h3>
+        <label>Username</label>
+        <input id="pUsername" type="text" />
+        <label>Password</label>
+        <input id="pPassword" type="password" />
+
+        <h3>Security Questions</h3>
+        <div id="pSecurityQuestions"></div>
+
+        <h3>Appointment</h3>
+        <label>Cities</label>
+        <div class="city-checks">
+          <label><input type="checkbox" value="NEW DELHI VAC" /> NEW DELHI VAC</label>
+          <label><input type="checkbox" value="HYDERABAD VAC" /> HYDERABAD VAC</label>
+          <label><input type="checkbox" value="KOLKATA VAC" /> KOLKATA VAC</label>
+          <label><input type="checkbox" value="CHENNAI VAC" /> CHENNAI VAC</label>
+          <label><input type="checkbox" value="MUMBAI VAC" /> MUMBAI VAC</label>
+        </div>
+
+        <div class="row two-cols">
+          <div>
+            <label>Preferred Month</label>
+            <select id="pMonth">
+              <option value="Jan">Jan</option>
+              <option value="Feb">Feb</option>
+              <option value="Mar">Mar</option>
+              <option value="Apr">Apr</option>
+              <option value="May">May</option>
+              <option value="Jun">Jun</option>
+              <option value="Jul">Jul</option>
+              <option value="Aug">Aug</option>
+              <option value="Sep" selected>Sep</option>
+              <option value="Oct">Oct</option>
+              <option value="Nov">Nov</option>
+              <option value="Dec">Dec</option>
+            </select>
+          </div>
+          <div>
+            <label>Preferred Year</label>
+            <input id="pYear" type="number" min="2024" max="2035" value="2026" />
+          </div>
+        </div>
+
+        <div class="row two-cols">
+          <div>
+            <label>Start Date</label>
+            <input id="pStartDate" type="date" />
+          </div>
+          <div>
+            <label>End Date</label>
+            <input id="pEndDate" type="date" />
+          </div>
+        </div>
+
+        <label>Preferred Time (optional)</label>
+        <input id="pPreferredTime" type="text" placeholder="e.g. 10:00 AM" />
+
+        <div class="row two-cols">
+          <div>
+            <label>Chrome Debug Port</label>
+            <input id="pDebugPort" type="number" value="9222" />
+          </div>
+          <div>
+            <label>Chrome User Data Dir</label>
+            <input id="pUserDataDir" type="text" readonly />
+          </div>
+        </div>
+
+        <div class="modal-actions">
+          <button id="saveProfile" class="success">Save Profile</button>
+          <button id="deleteProfile" class="danger" style="display:none">Delete</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Edit Profiles List Modal -->
+  <div id="editListModal" class="modal" style="display:none">
+    <div class="modal-backdrop"></div>
+    <div class="modal-card list-modal-card">
+      <div class="modal-header">
+        <h2>Edit Profiles</h2>
+        <button id="editListClose" class="close-btn">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div id="editListContainer" class="edit-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Slot Pattern Modal -->
+  <div id="slotPatternModal" class="modal" style="display:none">
+    <div class="modal-backdrop"></div>
+    <div class="modal-card slot-pattern-card">
+      <div class="modal-header">
+        <h2>Slot Pattern (Calendar Visibility Log)</h2>
+        <button id="slotPatternClose" class="close-btn">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="slot-pattern-controls">
+          <label>Filter by city:</label>
+          <select id="slotPatternCityFilter">
+            <option value="">All cities</option>
+          </select>
+          <button id="slotPatternRefresh" class="small">Refresh</button>
+          <span id="slotPatternCount" class="slot-pattern-count"></span>
+        </div>
+        <div class="slot-pattern-table-wrap">
+          <table id="slotPatternTable" class="slot-pattern-table">
+            <thead>
+              <tr>
+                <th>Time (IST)</th>
+                <th>Profile</th>
+                <th>Stage</th>
+                <th>City</th>
+                <th>Available Dates</th>
+                <th>In-Range</th>
+                <th>API</th>
+              </tr>
+            </thead>
+            <tbody id="slotPatternBody"></tbody>
+          </table>
+        </div>
+        <div id="slotPatternEmpty" class="muted" style="display:none">No observations recorded yet. Run the automation to start collecting calendar visibility data.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Custom Dialog (replaces alert/confirm) -->
+  <div id="dialogOverlay" class="modal" style="display:none">
+    <div class="modal-backdrop"></div>
+    <div class="modal-card dialog-card">
+      <div class="modal-body">
+        <p id="dialogMessage" class="dialog-message"></p>
+        <div class="modal-actions">
+          <button id="dialogCancel" class="small">Cancel</button>
+          <button id="dialogOk" class="small success">OK</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Debug Panel -->
+  <div id="debugPanel" class="debug-panel" style="display:none">
+    <div class="debug-header">
+      <b>Debug Log</b>
+      <button id="debugToggle" class="small">Hide</button>
+    </div>
+    <pre id="debugLog"></pre>
   </div>
 
   <script src="./renderer.js"></script>

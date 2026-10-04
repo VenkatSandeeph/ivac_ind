@@ -1,36 +1,73 @@
 {
-  "name": "us-visa-scheduling-automation",
-  "version": "0.1.0",
+  "name": "ivac-launcher",
+  "version": "1.0.0",
   "private": true,
   "type": "commonjs",
+  "main": "ui/main.js",
   "scripts": {
     "start": "tsx src/index.ts",
     "build": "tsc -p tsconfig.json",
-    "clean": "if exist dist rmdir /S /Q dist",
-    "build:exe": "npm run clean && npm run build && npx @yao-pkg/pkg -t node24-win-x64 -o dist/ivac.exe dist/index.js",
-    "build:release": "npm run build:exe && copy /Y config.example.json dist\\config.local.json",
-    "ui:start": "electron ui/main.js",
-    "prepare": "playwright install chromium",
-    "protect": "npm run build && node scripts/protect.mjs"
+    "clean": "if exist dist rmdir /S /Q dist && if exist protected rmdir /S /Q protected",
+    "ui:start": "electron .",
+    "prepare": "patchright install chromium",
+    "protect": "npm run build && node scripts/protect.mjs",
+    "build:core": "node scripts/protect.mjs && npx @yao-pkg/pkg -t node24-win-x64 --no-bytecode --public -o dist/ivac-core.exe protected/app.js",
+    "build:release": "node scripts/build-release.mjs",
+    "build:dev": "node scripts/build-release.mjs --mode=dev",
+    "build:client": "node scripts/build-release.mjs --mode=client"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.112.3",
-    "ghost-cursor": "^1.4.2",
-    "playwright": "^1.55.0"
+    "patchright": "^1.62.1"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",
     "@yao-pkg/pkg": "^6.22.0",
     "electron": "^32.0.1",
+    "electron-builder": "^25.1.8",
     "esbuild": "^0.28.2",
     "javascript-obfuscator": "^5.5.0",
     "tsx": "^4.23.11",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.0"
   },
   "pkg": {
     "assets": [
-      "node_modules/playwright/node_modules/playwright-core/browsers.json",
-      "node_modules/playwright-core/browsers.json"
+      "node_modules/patchright/node_modules/patchright-core/browsers.json",
+      "node_modules/patchright-core/browsers.json"
     ]
+  },
+  "build": {
+    "appId": "com.ivac.launcher",
+    "productName": "IVAC Launcher",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "ui/main.js",
+      "ui/renderer.js",
+      "ui/index.html",
+      "ui/styles.css"
+    ],
+    "extraFiles": [
+      {
+        "from": "dist/ivac-core.exe",
+        "to": "ivac-core.exe"
+      },
+      {
+        "from": "node_modules/patchright",
+        "to": "node_modules/patchright"
+      },
+      {
+        "from": "node_modules/patchright-core",
+        "to": "node_modules/patchright-core"
+      }
+    ],
+    "win": {
+      "target": "dir",
+      "sign": false,
+      "signAndEditExecutable": false
+    }
   }
 }

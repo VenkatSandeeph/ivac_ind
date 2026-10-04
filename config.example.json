@@ -35,5 +35,9 @@
   "autoSolveCloudflare": false,
   "headless": false,
   "alertOnMajorEvents": true,
-  "screenshotAfterSelection": true
+  "screenshotAfterSelection": true,
+  "cityRetrySeconds": 10,
+  "dryRun": true,
+  "preferLeastSlots": false,
+  "autoRotateIp": true
 }

@@ -5,4 +5,29 @@ config.local.json
 artifacts/
 cloudflare-recordings.json
 chrome-debug/
-ui/*.js
+protected/
+release/
+.ivac-stop
+.license
+
+# --- Runtime state & signals ---
+.ivac-*
+logs/
+chrome-debug-*/
+
+# --- Credentials & plaintext imports (never commit) ---
+profiles_import.json
+license*.json
+
+# --- Mobile app (desktop-only repo) ---
+mobile_session/
+
+# --- Release output (all variants) ---
+release*/
+
+# --- Dev scratch / one-off recon tooling (not product code) ---
+recon*
+bisect*
+debug-run*
+%TEMP%targets.json
+nul

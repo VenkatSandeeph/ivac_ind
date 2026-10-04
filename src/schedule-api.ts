@@ -1,4 +1,4 @@
-import type { Page, Response } from 'playwright';
+import type { Page, Response } from 'patchright';
 import { warn, info } from './logger';
 
 export type ScheduleApiResult = {
@@ -10,6 +10,12 @@ export type ScheduleApiResult = {
   payload: any;
   parseError: boolean;
   timeout?: boolean;
+  /**
+   * App-level error code from a 200 response body (e.g. "SGA14"), when
+   * HasError=true. Distinct from transport errors (403/429): the backend
+   * answered but rejected the request — usually broken group-member context.
+   */
+  appErrorCode: string | null;
 };
 
 const SCHEDULE_ROUTE = '/api/v1/schedule-group/get-family-ofc-schedule-days';
@@ -34,18 +40,32 @@ function extractJsonObject(text: string): any | null {
   }
 }
 
-export async function waitForScheduleResponse(page: Page, timeoutMs: number) {
+/**
+ * Waits for the get-family-ofc-schedule-days response.
+ * `postIdFilter` (the <option> value of the city we selected) pins the wait to
+ * THAT city's request: the single-city flow's empty pre-select fires the same
+ * route with postId:"" and returns instantly, so an unfiltered waiter used to
+ * resolve on the wrong response and report empty days for the real city.
+ */
+export async function waitForScheduleResponse(page: Page, timeoutMs: number, postIdFilter?: string): Promise<ScheduleApiResult> {
   info('Waiting for schedule API response');
 
   try {
     const response = await page.waitForResponse(
       (res) => {
         try {
-          return (
-            res.request().method() === 'POST' &&
-            res.url().includes('/custom-actions/') &&
-            res.url().includes(SCHEDULE_ROUTE)
-          );
+          if (
+            res.request().method() !== 'POST' ||
+            !res.url().includes('/custom-actions/') ||
+            !res.url().includes(SCHEDULE_ROUTE)
+          ) {
+            return false;
+          }
+          if (!postIdFilter) return true;
+          // Request body is 'parameters=<urlencoded JSON>' — decoded contains
+          // "postId":"<guid>". A guid substring match is sufficient.
+          const pd = res.request().postData() || '';
+          return decodeURIComponent(pd).includes(postIdFilter);
         } catch {
           return false;
         }
@@ -63,6 +83,10 @@ export async function waitForScheduleResponse(page: Page, timeoutMs: number) {
       status < 300 &&
       !payload?.HasError &&
       (scheduleDays.length > 0 || scheduleEntries.length > 0);
+    const appErrorCode = payload?.HasError
+      ? (String(payload?.Errors?.m_StringValue || payload?.ErrorString || 'has_error')
+          .replace(/<[^>]+>/g, ' ').trim() || 'has_error')
+      : null;
 
     // Build human-readable date strings from scheduleDays / scheduleEntries when possible
     const extractDate = (item: any) => {
@@ -87,6 +111,7 @@ export async function waitForScheduleResponse(page: Page, timeoutMs: number) {
     info('Schedule API response received', {
       status,
       available,
+      appError: appErrorCode,
       scheduleDays: scheduleDays.length,
       scheduleEntries: scheduleEntries.length,
       scheduleDaySamples: scheduleDayStrings,
@@ -100,8 +125,9 @@ export async function waitForScheduleResponse(page: Page, timeoutMs: number) {
       scheduleDays,
       scheduleEntries,
       payload,
-      parseError: payload === null
-    } as const;
+      parseError: payload === null,
+      appErrorCode
+    };
   } catch (error) {
     if (error instanceof Error && error.name === 'TimeoutError') {
       warn('Schedule API response timed out');
@@ -113,8 +139,9 @@ export async function waitForScheduleResponse(page: Page, timeoutMs: number) {
         scheduleEntries: [],
         payload: null,
         parseError: true,
-        timeout: true
-      } as const;
+        timeout: true,
+        appErrorCode: null
+      };
     }
 
     throw error;

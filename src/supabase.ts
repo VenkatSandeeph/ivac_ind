@@ -70,4 +70,62 @@ export async function sendSupabaseEvent(eventType: string, payload: Record<strin
   }
 }
 
+/**
+ * Upserts a login_submitted event: if an existing login_submitted row matches
+ * the same username + system (hostname), updates its timestamp and payload
+ * instead of inserting a duplicate. Falls back to insert if the query fails.
+ *
+ * This prevents the Supabase events table from accumulating duplicate login
+ * rows for the same user on the same machine across multiple runs.
+ */
+export async function upsertLoginEvent(payload: Record<string, any>): Promise<boolean> {
+  const c = initClientIfNeeded();
+  if (!c) return false;
+
+  const table = process.env.SUPABASE_EVENT_TABLE || (loadLocalSupabaseConfig().table || 'events');
+  const username = String(payload?.username || '');
+  const system = os.hostname();
+
+  try {
+    // Query for an existing login_submitted event for this user + system
+    const { data, error } = await c
+      .from(table)
+      .select('id')
+      .eq('event_type', 'login_submitted')
+      .eq('system', system)
+      .filter('payload->>username', 'eq', username)
+      .limit(1);
+
+    if (error) {
+      warn('Supabase query error in upsertLoginEvent (falling back to insert):', error);
+      return sendSupabaseEvent('login_submitted', payload);
+    }
+
+    if (data && data.length > 0) {
+      // Update existing row's timestamp and payload
+      const existingId = data[0].id;
+      const { error: updateError } = await c
+        .from(table)
+        .update({
+          payload: payload || {},
+          created_at: new Date().toISOString()
+        })
+        .eq('id', existingId);
+
+      if (updateError) {
+        warn('Supabase update error in upsertLoginEvent:', updateError);
+        return false;
+      }
+      info('Supabase login event updated (existing row for user=' + username + ' system=' + system + ')');
+      return true;
+    }
+
+    // No existing row — insert new
+    return sendSupabaseEvent('login_submitted', payload);
+  } catch (e) {
+    warn('Failed to upsert login event (falling back to insert):', e);
+    return sendSupabaseEvent('login_submitted', payload);
+  }
+}
+
 export default sendSupabaseEvent;
