@@ -148,11 +148,23 @@ function scheduleWaitMs(): number {
 const specialSweepQueue: string[] = [];
 let specialSweepRunning = false;
 let specialSweepTotal = 0;
+let specialSweepSingleCity = false;
 
-/** Arm the sweep: every desired city once, starting at rotation's next city. */
+/** Arm the sweep: every desired city once, starting at rotation's next city.
+ *  Single city: queue the same city 3x at ~7s gaps — the loop is serialized so
+ *  each attempt only fires after the previous response resolved/timed out. */
 function beginSpecialSweep(cities: readonly string[], nextIndex: number): void {
-  if (cities.length <= 1) return; // single city: just the :58 selection itself
   specialSweepQueue.length = 0;
+  if (cities.length === 1) {
+    for (let i = 0; i < 3; i++) specialSweepQueue.push(cities[0]);
+    specialSweepTotal = specialSweepQueue.length;
+    specialSweepRunning = true;
+    specialSweepSingleCity = true;
+    info(`SPECIAL WINDOW: Single-city sweep armed — ${cities[0]} x3 (~7s gap, 60s response cap per attempt)`);
+    client('🎯', `SPECIAL WINDOW: sweeping ${cities[0]} — 3 attempts`);
+    return;
+  }
+  specialSweepSingleCity = false;
   for (let i = 0; i < cities.length; i++) {
     specialSweepQueue.push(cities[(nextIndex + i) % cities.length]);
   }
@@ -167,6 +179,7 @@ function abortSpecialSweep(reason: string): void {
   if (!specialSweepQueue.length) return; // nothing left to abort — last city already in-flight
   specialSweepQueue.length = 0;
   specialSweepRunning = false;
+  specialSweepSingleCity = false;
   warn(`SPECIAL WINDOW: Sweep aborted — ${reason}. Resuming normal city retry.`);
   client('⚠️', `SPECIAL WINDOW: sweep stopped (${reason})`);
 }
@@ -631,7 +644,10 @@ function computeRetryDelay(
   const normalDelay = baseMs + jitterMs;
 
   if (specialSweepQueue.length) {
-    return { delayMs: 2000 + Math.floor(Math.random() * 2000), specialTrigger: -1, awaitingWindow: false };
+    const sweepGap = specialSweepSingleCity
+      ? 7000 + Math.floor(Math.random() * 2000)
+      : 2000 + Math.floor(Math.random() * 2000);
+    return { delayMs: sweepGap, specialTrigger: -1, awaitingWindow: false };
   }
 
   const { delayMs: msUntilSpecial, triggerSec } = msUntilNextSpecialWindow();
@@ -773,7 +789,7 @@ async function probeGroupMembersMissing(page: Page): Promise<boolean> {
 }
 
 // ---------------------------------------------------------------------------
-//  Special Window run gate (experimental — dev builds only)
+//  Special Window run gate
 // ---------------------------------------------------------------------------
 // When enabled, the main loop runs ONLY inside fixed system-clock windows
 // (:20–:30 and :50–:00 each hour) and freezes — zero page/API activity —
@@ -785,9 +801,6 @@ const RUN_WINDOW_STARTS_MIN = [20, 50];
 const RUN_WINDOW_LEN_MIN = 10;
 
 function specialWindowEnabled(config: AutomationConfig): boolean {
-  // Dev-build-only feature — disabled entirely in client builds even if the
-  // flag file or config is present.
-  if (process.env.IVAC_BUILD_MODE === 'client') return false;
   try {
     if (fs.existsSync(SPECIAL_WINDOW_FLAG_FILE)) {
       const v = fs.readFileSync(SPECIAL_WINDOW_FLAG_FILE, 'utf8').trim().toLowerCase();
@@ -1088,7 +1101,7 @@ async function main() {
     info('Slot selection mode: LEAST available slots first (preferLeastSlots enabled)');
   }
   if (config.specialWindowOnly) {
-    info('Special Window mode ON: loop runs only inside :20–:30 / :50–:00 server-UTC windows (.ivac-special-window flag can toggle live).');
+    info('Special Window mode ON: loop runs only inside :20–:30 / :50–:00 system-clock windows (.ivac-special-window flag can toggle live).');
   }
   if (!config.autoRotateIp) {
     info('Auto IP disabled — IP never rotates automatically; soft 403/429 cool down 60s, hard blocks stop the profile');
@@ -1182,9 +1195,9 @@ async function main() {
       process.exit(0);
     }
 
-    // Special Window gate (experimental, dev builds) — evaluated once per
-    // loop iteration, so an in-flight booking always finishes before the
-    // pause takes effect ("finish, then pause").
+    // Special Window gate — evaluated once per loop iteration, so an
+    // in-flight booking always finishes before the pause takes effect
+    // ("finish, then pause").
     if (specialWindowEnabled(config) && (await waitForRunWindowIfNeeded(config))) {
       info('[STOPPED] Stop signal received during Special Window pause. Script stopping.');
       client('🛑', 'Script stopped');
@@ -1296,6 +1309,7 @@ async function main() {
     // Sweep finished naturally (queue drained) — resume normal cadence.
     if (specialSweepRunning && specialSweepQueue.length === 0) {
       specialSweepRunning = false;
+      specialSweepSingleCity = false;
       info('SPECIAL WINDOW: Sweep complete — all cities tried, resuming normal city retry.');
       client('✅', 'SPECIAL WINDOW: sweep done — normal retry resumes');
     }
@@ -1307,7 +1321,7 @@ async function main() {
     if (specialSweepQueue.length) {
       const pos = specialSweepTotal - specialSweepQueue.length + 1;
       currentCity = specialSweepQueue.shift()!;
-      info(`SPECIAL WINDOW: Sweep city ${pos}/${specialSweepTotal}: ${currentCity}`);
+      info(`SPECIAL WINDOW: Sweep ${specialSweepSingleCity ? 'attempt' : 'city'} ${pos}/${specialSweepTotal}: ${currentCity}`);
     }
     let scheduleResult: Awaited<ReturnType<typeof waitForScheduleResponse>> | null = null;
     let noSlots = false;

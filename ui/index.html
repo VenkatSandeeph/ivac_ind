@@ -37,7 +37,7 @@
         <label class="header-check" title="When checked, the IP rotates automatically on blocks (403/Cloudflare). When unchecked, IP never rotates automatically — 403s cool down on the same IP and a hard IP block stops the profile. Manual Rotate IP still works. Applies on next profile start.">
           <input type="checkbox" id="autoIpChk" checked /> Auto IP
         </label>
-        <label class="header-check" id="specialWindowLabel" title="Experimental (dev only): when checked, profiles run only during :20–:30 and :50–:00 server-UTC windows each hour and freeze between them. Applies live to running profiles.">
+        <label class="header-check" id="specialWindowLabel" title="When checked, profiles run only during :20–:30 and :50–:00 system-clock windows each hour and freeze between them. Applies live to running profiles.">
           <input type="checkbox" id="specialWindowChk" /> Special Window
         </label>
         <button id="rotateIpBtn" class="rotate-ip-header-btn">
@@ -65,7 +65,10 @@
       <section class="panel log-panel">
         <div class="log-header">
           <h2>Logs <span id="logProfileName"></span></h2>
-          <button id="clearLogs">Clear Logs</button>
+          <div>
+            <button id="saveLogs">Save Logs</button>
+            <button id="clearLogs">Clear Logs</button>
+          </div>
         </div>
         <pre id="logBox"></pre>
       </section>

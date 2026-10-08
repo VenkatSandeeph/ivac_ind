@@ -30,6 +30,21 @@ export type BrowserConnection = BrowserLaunch & {
   existing: boolean;
 };
 
+/**
+ * Client-side request blocking — the DevTools "Network request blocking" recipe.
+ * The schedule page fires a page-views telemetry POST per cycle; fulfilling it
+ * locally with an empty 204 keeps the XHR happy while dropping the request from
+ * the wire (one less hit feeding the rate limiter). Installed on the context so
+ * it covers the automation page and any tabs it opens later.
+ */
+async function blockPageViewTelemetry(context: BrowserContext): Promise<void> {
+  try {
+    await context.route('**/api/v1/page-views/**', (route) => route.fulfill({ status: 204 }));
+    info('Telemetry block armed: /api/v1/page-views/ → 204');
+  } catch (err) {
+    warn('Failed to install page-views route block:', err instanceof Error ? err.message : String(err));
+  }
+}
 
 export async function launchBrowser(config: AutomationConfig): Promise<BrowserLaunch> {
   info('Launching Chrome with remote debugging');
@@ -42,6 +57,8 @@ export async function launchBrowser(config: AutomationConfig): Promise<BrowserLa
     ignoreHTTPSErrors: true,
     args: launchArgs
   });
+
+  await blockPageViewTelemetry(context);
 
   const page = context.pages()[0] || await context.newPage();
   const browser = context.browser();
@@ -97,6 +114,7 @@ export async function connectToBrowser(config: AutomationConfig): Promise<Browse
   try {
     const browser = await chromium.connectOverCDP(endpoint);
     const context = browser.contexts()[0] || (await browser.newContext({ ignoreHTTPSErrors: true }));
+    await blockPageViewTelemetry(context);
     const existingPages = context.pages();
 
     const relevantPage = existingPages.find((p: any) => {

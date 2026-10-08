@@ -469,15 +469,12 @@ async function extractPageContext(page: Page): Promise<PageContext | null> {
     }
 
     if (applications.length === 0) {
-      // The page's jsdata has applications: [] but the page still works because
-      // it uses Token-based context. Use primaryId as the sole application.
-      if (result.primaryId) {
-        applications = [result.primaryId];
-        info('[FAST FLOW] Applications empty in DOM — using primaryId as sole application');
-      } else {
-        warn('[FAST FLOW] No applications available and no primaryId fallback');
-        return null;
-      }
+      // primaryId is NOT an application ID — never synthesize one (a submit
+      // with a fabricated applications array is a malformed booking, PSE0602
+      // territory). Empty is fine: the wire payload sends applications:null
+      // anyway (the Token carries context); the count is only used for the
+      // seat-availability filter, which then falls back to 1.
+      warn('[FAST FLOW] Member application IDs unavailable — proceeding without seat-count filter (treated as 1 member)');
     }
 
     info(`[FAST FLOW] Context: primaryId=${result.primaryId.substring(0, 8)}..., appd=${result.appd.substring(0, 8)}..., postId=${result.postId}, ${applications.length} application(s)`);
@@ -1132,7 +1129,9 @@ async function wireCustomAction(
   return page.evaluate(async (a: any) => {
     const url = '/en-US/custom-actions/?route=' + encodeURIComponent(a.route) +
       '&appd=' + a.appd + '&cacheString=' + Date.now();
-    const body = 'parameters=' + encodeURIComponent(JSON.stringify(a.params));
+    // The page's jQuery sends `parameters=` + RAW JSON (not URL-encoded) —
+    // match it byte-for-byte.
+    const body = 'parameters=' + JSON.stringify(a.params);
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), a.timeoutMs);
     try {
@@ -1155,6 +1154,23 @@ async function wireCustomAction(
   }, { appd, route, params, timeoutMs });
 }
 
+/**
+ * Replicates the page's exact Date conversion from getScheduleEntries():
+ *   var localDate = new Date(jsdata.Date);
+ *   var utcDate = new Date(Date.UTC(localDate.getFullYear(), localDate.getMonth(),
+ *     localDate.getDate(), localDate.getHours(), localDate.getMinutes(), localDate.getSeconds()));
+ *   jsdata.Date = utcDate.toISOString();
+ * i.e. the wall-clock fields are reinterpreted as UTC and serialized.
+ */
+function pageStyleUtcIso(dateStr: string): string {
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return dateStr;
+  return new Date(Date.UTC(
+    d.getFullYear(), d.getMonth(), d.getDate(),
+    d.getHours(), d.getMinutes(), d.getSeconds()
+  )).toISOString();
+}
+
 /** Direct fetch of get-family-ofc-schedule-entries — replaces the date-cell click. */
 async function wireFetchEntries(
   page: Page,
@@ -1162,6 +1178,9 @@ async function wireFetchEntries(
   day: ScheduleDay,
   daysToken: string
 ): Promise<WireEntriesResult> {
+  // Mirrors the page's jsdata byte-for-byte: getScheduleEntries() nulls the
+  // identity fields, sets isReschedule:"false" (string, not boolean), and
+  // sends the ISO-converted Date.
   const resp = await wireCustomAction(page, ctx.appd,
     '/api/v1/schedule-group/get-family-ofc-schedule-entries',
     {
@@ -1170,8 +1189,9 @@ async function wireFetchEntries(
       scheduleDayId: day.ID,
       scheduleEntryId: '',
       postId: null,
+      isReschedule: 'false',
       Token: daysToken,
-      Date: day.Date
+      Date: pageStyleUtcIso(day.Date)
     }, 60000);
 
   if (resp.status === 403 || resp.status === 429) {
@@ -1207,18 +1227,20 @@ async function wireSubmit(
   entriesToken: string,
   timeoutMs: number
 ): Promise<{ ok: boolean; redirectStub?: string; error?: string; blocked?: boolean; transport?: boolean }> {
+  // Mirrors the page's real submit payload: identity fields stay null (the
+  // Token carries the context), isReschedule is DELETED by the entries
+  // success handler before submit, and Date is the ISO-converted value.
   const resp = await wireCustomAction(page, ctx.appd,
     '/api/v1/schedule-group/schedule-ofc-appointments-for-family',
     {
-      primaryId: ctx.primaryId,
-      applications: ctx.applications,
+      primaryId: null,
+      applications: null,
       scheduleDayId: day.ID,
       scheduleEntryId: '',
-      postId: ctx.postId,
-      isReschedule: true,
+      postId: null,
       Num: entry.Num,
       Token: entriesToken,
-      Date: day.Date
+      Date: pageStyleUtcIso(day.Date)
     }, timeoutMs);
 
   if (resp.status === 403 || resp.status === 429) {
@@ -1278,16 +1300,26 @@ async function runWireBookingFlow(
       continue;
     }
 
-    // Earliest date stays the priority (dates are already sorted). Within a
-    // date, try LEAST-available slots first — the high-availability slot is
-    // the one every user/bot targets; the tail slots are less contended.
-    const sorted = sortScheduleEntries(entriesRes.entries, config.appointment.preferredTime, true);
-    info(`[WIRE FLOW] ${sorted.length} slot(s) on ${dateStr} (least-available first): ${sorted.map(e => `${e.Time}(avail=${e.EntriesAvailable})`).join(', ')}`);
-    client('🎯', `Slot found! Date: ${dateStr}, ${sorted.length} slot(s) — trying ${sorted[0].Time} first`);
+    // Earliest date stays the priority (dates are already sorted). Slot order
+    // honors the user's preferLeastSlots setting — same as the DOM path.
+    const sorted = sortScheduleEntries(entriesRes.entries, config.appointment.preferredTime, config.preferLeastSlots);
+    const orderLabel = config.preferLeastSlots ? 'least-available first' : 'most-available first';
+    info(`[WIRE FLOW] ${sorted.length} slot(s) on ${dateStr} (${orderLabel}): ${sorted.map(e => `${e.Time}(avail=${e.EntriesAvailable})`).join(', ')}`);
+
+    // Seat-count filter — a family can't book into an entry with fewer seats
+    // than members (the page's own validateSlotCount enforces this).
+    // Unknown member count → 1 (filters zero-availability entries only).
+    const memberCount = Math.max(1, ctx.applications.length);
+    const eligible = sorted.filter(e => e.EntriesAvailable >= memberCount);
+    if (eligible.length === 0) {
+      info(`[WIRE FLOW] All ${sorted.length} slot(s) on ${dateStr} below member count ${memberCount} — next date`);
+      continue;
+    }
+    client('🎯', `Slot found! Date: ${dateStr}, ${eligible.length} slot(s) — trying ${eligible[0].Time} first`);
 
     let entriesToken = entriesRes.token;
     let submits = 0;
-    for (const entry of sorted) {
+    for (const entry of eligible) {
       if (submits >= EXP_WIRE_MAX_SUBMITS_PER_DATE) break;
       if (config.dryRun) {
         info(`[WIRE FLOW] DRY RUN — would submit ${entry.Time} (Num=${entry.Num}) on ${dateStr}`);
@@ -1295,7 +1327,7 @@ async function runWireBookingFlow(
       }
 
       submits += 1;
-      info(`[WIRE FLOW] Submit ${submits}/${Math.min(sorted.length, EXP_WIRE_MAX_SUBMITS_PER_DATE)}: ${dateStr} @ ${entry.Time} (Num=${entry.Num}, avail=${entry.EntriesAvailable})`);
+      info(`[WIRE FLOW] Submit ${submits}/${Math.min(eligible.length, EXP_WIRE_MAX_SUBMITS_PER_DATE)}: ${dateStr} @ ${entry.Time} (Num=${entry.Num}, avail=${entry.EntriesAvailable})`);
       client('⏳', `Submitting OFC appointment for ${dateStr} at ${entry.Time}...`);
 
       const timeoutMs = di === 0 && submits === 1 ? 60000 : 45000;
@@ -1312,6 +1344,14 @@ async function runWireBookingFlow(
         return { success: false, fallback: true, reason: 'blocked' };
       }
 
+      // Hard errors (PSE0602/0610/0612) are checked BEFORE retokening —
+      // refiring entries on a hard stop is a wasted, logged request.
+      const errStr = (sub.error || '').toLowerCase();
+      if (errStr.includes('pse0602') || errStr.includes('pse0612') || errStr.includes('pse0610')) {
+        warn(`[WIRE FLOW] Hard submit error ${sub.error} — stopping retries for this city`);
+        return { success: false, fallback: false, reason: 'hard_error' };
+      }
+
       warn(`[WIRE FLOW] Submit failed (${sub.error || 'unknown'}) — retokening via fresh entries call`);
       if (sub.transport) {
         // Our fetch call itself failed while entries calls work — possible
@@ -1325,14 +1365,15 @@ async function runWireBookingFlow(
       if (re.blocked) return { success: false, fallback: true, reason: 'blocked' };
       if (re.ok) {
         entriesToken = re.token || entriesToken;
-        if (!re.entries.some(e => e.Num === entry.Num)) {
+        const fresh = re.entries.find(e => e.Num === entry.Num);
+        if (!fresh) {
           info(`[WIRE FLOW] Slot ${entry.Time} no longer listed — skipping`);
           continue;
         }
-      }
-      const errStr = (sub.error || '').toLowerCase();
-      if (errStr.includes('pse0602') || errStr.includes('pse0612') || errStr.includes('pse0610')) {
-        return { success: false, fallback: false, reason: 'hard_error' };
+        if (fresh.EntriesAvailable < memberCount) {
+          info(`[WIRE FLOW] Slot ${entry.Time} now below member count ${memberCount} — skipping`);
+          continue;
+        }
       }
     }
   }
@@ -1409,11 +1450,19 @@ export async function runDirectOfcFlow(page: Page, config: AutomationConfig): Pr
       continue;
     }
 
-    // Sort entries by preferred time + availability
+    // Sort entries by preferred time + availability, then drop entries with
+    // fewer seats than the family needs (page's validateSlotCount logic).
+    // Unknown member count → 1 (only zero-availability entries are dropped).
     const sortedEntries = sortScheduleEntries(entriesResult.entries, config.appointment.preferredTime, config.preferLeastSlots);
-    info(`[FAST FLOW] ${sortedEntries.length} time slot(s) for ${date.Date.substring(0, 10)}: ${sortedEntries.map(e => `${e.Time}(avail=${e.EntriesAvailable})`).join(', ')}`);
-    if (sortedEntries.length > 0) {
-      const best = sortedEntries[0];
+    const memberCount = Math.max(1, ctx.applications.length);
+    const eligibleEntries = sortedEntries.filter(e => e.EntriesAvailable >= memberCount);
+    info(`[FAST FLOW] ${sortedEntries.length} time slot(s) for ${date.Date.substring(0, 10)} (${eligibleEntries.length} seat-eligible): ${sortedEntries.map(e => `${e.Time}(avail=${e.EntriesAvailable})`).join(', ')}`);
+    if (eligibleEntries.length === 0) {
+      info(`[FAST FLOW] All slots on ${date.Date.substring(0, 10)} below member count ${memberCount} — next date`);
+      continue;
+    }
+    {
+      const best = eligibleEntries[0];
       client('🎯', `Slot found! Date: ${date.Date.substring(0, 10)}, Time: ${best.Time}, Availability: ${best.EntriesAvailable}`);
     }
 
@@ -1428,7 +1477,7 @@ export async function runDirectOfcFlow(page: Page, config: AutomationConfig): Pr
     //
     // If only 1 date is available and it fails, we return all_exhausted so
     // the caller re-selects the city (full refresh, new getScheduleDays).
-    const entry = sortedEntries[0]; // best slot
+    const entry = eligibleEntries[0]; // best seat-eligible slot
     info(`[FAST FLOW] Submitting best slot for ${date.Date.substring(0, 10)}: '${entry.Time}' (Num=${entry.Num}, avail=${entry.EntriesAvailable})`);
     client('⏳', `Submitting OFC appointment for ${date.Date.substring(0, 10)} at ${entry.Time}...`);
 

@@ -125,14 +125,8 @@ if (buildMode === "client") {
     /if \(dp\) dp\.style\.display = 'block';/g,
     "if (dp) dp.style.display = 'none'; // hidden in client build"
   );
-  // Hide the dev-only "Special Window" header toggle in client builds.
-  const specialWinCount = (rendererJs.match(/specialWinLabel\.style\.display = '';/g) || []).length;
-  rendererJs = rendererJs.replace(
-    /specialWinLabel\.style\.display = '';/g,
-    "specialWinLabel.style.display = 'none'; // hidden in client build"
-  );
   fs.writeFileSync(rendererPath, rendererJs);
-  console.log(`    renderer.js: hidden ${debugPanelCount} debug panel display(s), ${specialWinCount} dev-only toggle(s)`);
+  console.log(`    renderer.js: hidden ${debugPanelCount} debug panel display(s)`);
 } else {
   console.log("  Dev mode: no UI modifications needed.");
 }

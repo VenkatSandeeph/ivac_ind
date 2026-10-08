@@ -240,11 +240,6 @@ async function loadProfiles() {
       autoIpChk.checked = appState.settings.autoRotateIp !== false;
     }
 
-    // DEV-ONLY toggle: hidden in client builds (build-release.mjs rewrites
-    // the display value below to 'none').
-    const specialWinLabel = document.getElementById('specialWindowLabel');
-    if (specialWinLabel) specialWinLabel.style.display = '';
-
     // Sync header "Special Window" checkbox with persisted setting
     const swChk = document.getElementById('specialWindowChk');
     if (swChk && !appState.specialWindowSaving) {
@@ -355,6 +350,21 @@ async function pollLogs() {
       }
     }
   } catch {}
+}
+
+async function apiSaveLogs() {
+  if (!appState.selectedProfileId) return;
+  try {
+    const res = await fetch('/api/profiles/' + appState.selectedProfileId + '/save-logs', { method: 'POST' });
+    const data = await res.json();
+    if (data.ok) {
+      showAlert('Logs saved:\n' + data.fileName + '\n\n' + data.path);
+    } else {
+      showAlert(data.msg || 'Could not save logs');
+    }
+  } catch (e) {
+    showAlert('Could not save logs: ' + (e.message || 'server error'));
+  }
 }
 
 async function apiClearLogs() {
@@ -773,6 +783,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('editProfilesBtn')?.addEventListener('click', openEditList);
   document.getElementById('reloadProfilesBtn')?.addEventListener('click', () => loadProfiles());
   document.getElementById('clearLogs')?.addEventListener('click', apiClearLogs);
+  document.getElementById('saveLogs')?.addEventListener('click', apiSaveLogs);
 
   document.getElementById('slotPatternBtn')?.addEventListener('click', openSlotPattern);
   document.getElementById('slotPatternClose')?.addEventListener('click', closeSlotPattern);
@@ -860,7 +871,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // Header "Special Window" checkbox (dev-only) — persisted in settings AND
+  // Header "Special Window" checkbox — persisted in settings AND
   // written to a live flag file so running profiles pause/resume without a
   // restart.
   document.getElementById('specialWindowChk')?.addEventListener('change', async (e) => {

@@ -30,7 +30,7 @@ let mainWindow = null;
 let licenseValidated = false;
 let licenseClientName = '';
 const STOP_SIGNAL_FILE_BASE = path.join(PROJECT_ROOT, '.ivac-stop');
-// Live flag file for the Special Window toggle (dev-only feature). Running
+// Live flag file for the Special Window toggle. Running
 // cores read this each loop iteration — "on"/"off" — so the checkbox pauses
 // and resumes profiles without a restart.
 const SPECIAL_WINDOW_FLAG_FILE = path.join(PROJECT_ROOT, '.ivac-special-window');
@@ -975,7 +975,7 @@ const apiServer = http.createServer(async (req, res) => {
   }
 
   // Per-profile actions
-  const profileMatch = url.match(/^\/api\/profiles\/([^/]+)\/(start|stop|connect-chrome|logs)$/);
+  const profileMatch = url.match(/^\/api\/profiles\/([^/]+)\/(start|stop|connect-chrome|logs|save-logs)$/);
   if (profileMatch && req.method === 'POST') {
     const profileId = profileMatch[1];
     const action = profileMatch[2];
@@ -986,6 +986,32 @@ const apiServer = http.createServer(async (req, res) => {
     if (action === 'logs') {
       const rec = runningProfiles.get(profileId);
       return jsonResponse(res, { ok: true, logs: rec ? rec.log : '', status: rec ? rec.status : 'Stopped' });
+    }
+    if (action === 'save-logs') {
+      const rec = runningProfiles.get(profileId);
+      const text = rec && rec.log ? rec.log : '';
+      if (!text.trim()) {
+        return jsonResponse(res, { ok: false, msg: 'No logs to save' });
+      }
+      try {
+        const cfg = migrateLegacyConfig(readConfig());
+        const profile = getProfileFromConfig(cfg, profileId);
+        const user = String(profile && profile.username ? profile.username : profileId)
+          .replace(/[^a-zA-Z0-9_-]/g, '_');
+        const d = new Date();
+        const pad = (n) => String(n).padStart(2, '0');
+        const ts = d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) +
+          '_' + pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds());
+        const fileName = 'profile_' + user + '_' + ts + '.txt';
+        const dir = path.join(PROJECT_ROOT, 'logs');
+        fs.mkdirSync(dir, { recursive: true });
+        const filePath = path.join(dir, fileName);
+        fs.writeFileSync(filePath, text, 'utf8');
+        console.log('[save-logs] wrote ' + filePath + ' (' + text.length + ' chars)');
+        return jsonResponse(res, { ok: true, fileName, path: filePath });
+      } catch (e) {
+        return jsonResponse(res, { ok: false, msg: 'Save failed: ' + (e.message || e) });
+      }
     }
   }
 

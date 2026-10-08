@@ -93,10 +93,10 @@ Priority order inside `PageInfo.state`: verify → queue → rateLimited → blo
 3. `waitSchedDays(respWaitMs())` — API `ScheduleDays` is authoritative; DOM calendar is UNIONed in so a stale API payload can't hide visible green dates.
 4. `extractApiDates()` normalizes `ScheduleDate|Date|CalendarDate|Day|SlotDate` → `YYYY-MM-DD`; `inRangeList()` filters `startDate..endDate` (lexicographic).
 5. On any calendar visibility: `SlotLog.record()` (`stage="ofc"`/`"consular"`) + notification + `beep()` (dual-tone, desktop `playBeep` parity).
-6. Per in-range date (cap `MAX_DATE_ATTEMPTS=3` per city): `calMonthYear` → re-read DOM cal → `dateClick` (one retry) → entries wait → `PRE_SUBMIT` → `pickTime`/`fireSubmit` → `SUBMIT_RESULT` + authoritative `appointments-for-family` API verdict.
+6. Per in-range date (ALL candidates, desktop parity): `calMonthYear` → re-read DOM cal → `dateClick` (one retry) → entries wait → `PRE_SUBMIT` → **slot loop** (`Js.pickSlot` iterates every time slot on the date — a taken/failed submit falls through to the next slot, capped at `MAX_SLOTS_PER_DATE=5`) → quick ~600ms `SUBMIT_ENABLED` check then force-enable + `fireSubmit` (desktop: `jsdata.Num` is set synchronously by the radio click, so `onClickSubmit()` works before formal enable) → `SUBMIT_RESULT` + authoritative `appointments-for-family` verdict (empty 2xx HTML wrappers skipped for the real JSON body; `AllScheduled`/`HasError`/`RedirectStub` parsed — `RedirectStub` navigates straight to `/en-US/<stub>` instead of waiting on the site redirect).
 7. Disguised-block guard: when both API and calendar come back empty, the page is re-fingerprinted for `blockReason` before advancing city.
-8. Outcomes: OFC `booked` → `Telegram.sendOfcBooked` + beep + `Checkpoint.save("ofc-booked")` → **returns to runLoop which continues into the consular stage**; consular `booked` → `Telegram.sendConsularBooked` + stop; `taken` → next date; `left` → outer loop resumes.
-9. Next city after `profile.cityRetrySeconds` (special-window alignment unchanged).
+8. Outcomes: OFC `booked` → `Telegram.sendOfcBooked` + beep + `Checkpoint.save("ofc-booked")` → **returns to runLoop which continues into the consular stage**; consular `booked` → `Telegram.sendConsularBooked` + stop; `taken`/`HasError` → next time slot; `left` → outer loop resumes.
+9. Next city after `computeRetryDelay` — full desktop special-window port: `:58`-of-minute triggers **12, 25, 29, 36, 49, 55, 59** on the **local system clock**, `preciseSleepUntilSpecialWindow` (~ms precision), and `beginSpecialSweep` multi-city sweep (all desired cities once each, 2-4s gaps, 60s-per-city cap, `abortSpecialSweep` on a wedged response).
 
 After OFC success the engine waits for the site redirect to `/en-US/schedule/` (up to 2min — never re-runs the OFC cycle, avoiding double-book). The first CONSULAR detection per run fires `Telegram.sendConsularStage` once, then the same DOM cycle books consular slots. A direct-API booking navigates the page to the consular URL itself (a raw XHR submit never triggers the site redirect).
 
@@ -145,7 +145,8 @@ flowchart LR
 
 **Triggers** (in `Engine`, desktop `recoverFromBlockPage` + strike semantics):
 - `HARD_BLOCKED` page → `recoverFromBlock(blockReason)`: `access_limitation` → `clearCache()` + rotate + reload; `cloudflare_blocked` (CF-1020) → **two-stage**: wait 30s → navigate home → re-check; only if still blocked → `clearCache()` + rotate; `rate_limited` → 60s backoff + reload, never rotates.
-- Schedule-API `403/429` → strikes 1–2 set `homeRecoveryPending` (ofcLoop re-enters via home page, jittered 3–5s pause); **strike 3 → rotate** (suppressed inside drop windows via `suppressApiRotateUntil`).
+- Schedule-API `403/429` → **403** strikes 1–2 set `homeRecoveryPending` (home re-entry, jittered 3–5s pause); **429** strikes 1–2 set `rateLimitHoldPending` (60–90s quiet on-page hold + one reload — home navigation fires ~6-8 requests and keeps the limiter hot). **Strike 3 → rotate**, but only after a live `detectState` confirms the page isn't actually a hard-block page (defers to `recoverFromBlock` staging); suppressed inside drop windows via `suppressApiRotateUntil`. `blockCycleCount` circuit breaker: 3 full strike→rotation cycles with no clean response → 10-min cooldown + notification (block isn't IP-scoped).
+- **App-error ladder** (`HasError` 200 / 5xx on schedule-days, incl. the `No Class Selected` synthetic): home re-entry each strike, one rotation at 5, 10-min cooldown + notification at 8 — desktop `consecutiveAppErrorCount` parity. `probeGroupMembersMissing` pre-flight (`Js.GROUP_MEMBERS_MISSING`) skips the guaranteed-doomed city select.
 - Silent-block: ×3 consecutive schedule-API timeouts with zero completed responses → rotate (egress tarpitted, no 403 arrives to strike on).
 - Tunnel watchdog: tunnel dropped mid-run → `rotate()` reconnects the same server inside cooldown.
 
@@ -190,6 +191,10 @@ Gated by the `direct_api` setting (header API:ON/OFF button, default OFF). When 
 ## Known deltas vs desktop
 
 - Direct API is the fetch-based sweep above — not the desktop's 3-tier jQuery/XHR/DOM-capture stack (`api-direct.ts` Tier-1/2 don't exist on mobile).
-- Rotation pool is country-granular (≤4 WG servers/country) vs the desktop's 67-city NordVPN CLI sequence — same order, coarser granularity.
+- Rotation pool is country-granular (≤4 WG servers/country) vs the desktop's 67-city NordVPN CLI sequence — same order, coarser granularity. New-exit IP is geo-verified via ip-api.com (wrong-country egress rejected), matching the desktop's target check.
 - `Checkpoint` is forensic-only (no fast-resume — page state is re-derived live); no Playwright-style diagnostics/traces.
 - One profile runs at a time (selection UI; concurrent sessions are a future goal).
+- Page-view telemetry requests (`/api/v1/page-views/`) are blocked client-side at two layers: `shouldInterceptRequest` (native, all subresources incl. XHR/fetch POSTs → 204) and inside `Js.INIT`'s XHR/fetch wrappers — the DevTools "request blocking" recipe applied to WebView.
+- The desktop's YouTube notification video maps to a looping `MediaPlayer` alarm on `STREAM_ALARM` (`Driver.alarm()`/`stopAlarm()`): rings on OFC booked (DOM + direct paths), consular booked, and resume-on-consular — once per run (`alarmPlayed`). Silenced by any touch on the app surface, STOP, or the app coming to the foreground.
+- Desktop `specialWindowOnly` maps to the `WIN` header toggle (`special_window` store key): ON = the loop freezes outside :20–:30 and :50–:00 **local-clock** windows (zero page/API activity between them, per-iteration gate so in-flight work finishes, toggle-off resumes mid-freeze); OFF = continuous polling.
+- Schedule-days responses are pinned to the selected postId (request-body match, buffered channel) — desktop `waitForScheduleResponse(postIdFilter)` parity. DOM time-slot iteration walks every slot per date (`Js.pickSlot`); DOM submit waits ~600ms then force-enables (`jsdata.Num` set synchronously by the radio click).

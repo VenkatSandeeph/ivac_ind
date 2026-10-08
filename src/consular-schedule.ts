@@ -17,6 +17,7 @@ import {
 } from './calendar';
 import { playBeep } from './beep';
 import { recordSlotObservation } from './slot-tracker';
+import { sendConfirmationPdfToTelegram } from './confirmation';
 
 const CONSULAR_URL_FRAGMENT = '/en-US/schedule/';
 const citySelectSelector = '#post_select';
@@ -337,6 +338,15 @@ export async function runConsularSchedule(page: Page, config: AutomationConfig):
         if (submitted === true) {
           info(`Consular stage: submit succeeded (${Date.now() - submitStart}ms, total ${Date.now() - consularStart}ms)`);
           client('✅', `CONSULAR BOOKED! Date=${dateCell.date} Time=${cand.time}`);
+          // The site navigates to /en-US/appointment-confirmation/ after a
+          // successful consular submit. Capture that page as a PDF (CDP
+          // printToPDF — same output as the page's Print button) and send it
+          // to Telegram. Awaited because the process exits after booking; the
+          // helper is bounded and never throws. Skipped on dry runs — no
+          // submit was clicked so no confirmation page will load.
+          if (!config.dryRun) {
+            await sendConfirmationPdfToTelegram(page, config);
+          }
           return true;
         }
         warn(`Consular stage: submit not enabled/clicked for time '${cand.time}' (${Date.now() - submitStart}ms); trying next time`);
