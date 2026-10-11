@@ -14,16 +14,17 @@ Robust, continuously-running automation for booking OFC appointments on [usvisas
 4. [How It Works](#how-it-works)
 5. [City Rotation](#city-rotation)
 6. [Special Window Timing](#special-window-timing)
-7. [Direct API Flow (3-Tier)](#direct-api-flow-3-tier)
-8. [Cloudflare Auto-Solve](#cloudflare-auto-solve)
-9. [Browser Resilience](#browser-resilience)
-10. [Checkpoint & Crash Recovery](#checkpoint--crash-recovery)
-11. [Recovery Strategy](#recovery-strategy)
-12. [Desktop UI Launcher](#desktop-ui-launcher)
-13. [Building a Single Windows Executable](#building-a-single-windows-executable)
-14. [Diagnostics](#diagnostics)
-15. [Project Structure](#project-structure)
-16. [Notes](#notes)
+7. [IP Modes & Proxy Rotation](#ip-modes--proxy-rotation)
+8. [Direct API Flow (3-Tier)](#direct-api-flow-3-tier)
+9. [Cloudflare Auto-Solve](#cloudflare-auto-solve)
+10. [Browser Resilience](#browser-resilience)
+11. [Checkpoint & Crash Recovery](#checkpoint--crash-recovery)
+12. [Recovery Strategy](#recovery-strategy)
+13. [Desktop UI Launcher](#desktop-ui-launcher)
+14. [Building a Single Windows Executable](#building-a-single-windows-executable)
+15. [Diagnostics](#diagnostics)
+16. [Project Structure](#project-structure)
+17. [Notes](#notes)
 
 ---
 
@@ -229,6 +230,53 @@ The script targets "special window" minutes each hour when appointment slots are
 3. Otherwise, the normal delay is used: `cityRetrySeconds * 1000 + random(0-2000ms)` jitter.
 
 The `getCityRefreshDelayMs()` function (used in date/time retry loops) has its own fast-retry windows at minutes `:25:40`-`:26:59` and `:55:40`-`:56:59`, where the delay is `random(0-10000ms)`.
+
+---
+
+## IP Modes & Proxy Rotation
+
+The UI's **IP Mode** dropdown (per profile, applied at start — stop/restart to change) selects how the profile's traffic exits the network:
+
+| Mode | `ipMode` | Behavior |
+|---|---|---|
+| **NO IP** | `none` | Never rotates. Soft 403/429s cool down 60s; a hard Cloudflare IP block stops the profile. |
+| **AUTO IP** | `auto` | NordVPN CLI rotation (machine-wide — all profiles share one IP). Rotates on hard blocks, 3-strike 403/429 ladders, consular 403s, and the manual Rotate IP button. |
+| **STATIC IP** | `static` | Per-profile proxy from `proxies.txt`, round-robin on the same triggers + manual Rotate IP. |
+
+`ipMode` lives in `config.local.json` (per-profile `ipMode` overrides `settings.ipMode`). Legacy configs with only `autoRotateIp` migrate automatically (`true`→`auto`, `false`→`none`); `autoRotateIp` is still written for backward compat and now means "rotation is allowed" (`ipMode !== 'none'`).
+
+### STATIC IP — how it works
+
+```
+Chrome --proxy-server→ 127.0.0.1:<debugPort+10000>  (local relay, in-process)
+   → CONNECT → current upstream proxy from proxies.txt → destination
+```
+
+Chrome launches **once** through the loopback relay (`src/static-proxy.ts`). Rotation swaps the relay's upstream pointer — no Chrome restart, no dropped page, and each profile gets its own egress IP.
+
+- **`proxies.txt`** — one proxy per line, `host:port[:user:pass]`, `#` comments and blanks skipped, optional `http://`/`socks5://` prefix (default `http`; the SOCKS5 handshake is implemented in `dialUpstream`).
+- **Shared round-robin** — `.ivac-proxy-index` + lock file in the working dir, so multiple static profiles never claim the same upstream simultaneously.
+- **Verification** — each candidate is checked (`CONNECT api.ipify.org:443` → real egress IP) before use; dead proxies are skipped and the observed IP is logged and written to `.ivac-static-last-ip` for the UI.
+- **Existing Chrome** — if Chrome is already up but wasn't launched through the relay (marker `.ivac-relay.json` in the user-data dir), it's closed and respawned through the proxy.
+- **Stop** — a graceful stop relaunches Chrome *direct* (no proxy) so the still-open session stays usable after the relay exits.
+- **Caveat** — only Chrome traffic is proxied; node-side calls (license, Telegram, Supabase) go direct. Rotating-gateway providers (e.g. Decodo sticky ports) pin one residential IP per port.
+
+### proxies.txt location
+
+| Context | Location |
+|---|---|
+| Dev (`npm start` / `npm run ui:start`) | Project root, next to `config.local.json` |
+| Packaged build | `release/win-unpacked/proxies.txt` — next to `IVAC Launcher.exe` |
+
+`proxies.txt` is **gitignored** (contains credentials). The release build strips it before creating `IVAC-Launcher.zip` so credentials never ship, then copies it back into `win-unpacked/` for local runs. Distributees must place their own `proxies.txt` next to the exe.
+
+Env overrides: `STATIC_PROXY_FILE` (path), `STATIC_PROXY_PORT_OFFSET` (default `10000`).
+
+Dev smoke test (requires `npm run build` first):
+
+```bash
+node test-static-proxy.js   # parses file → verifies upstream → relays a real HTTPS request → rotates
+```
 
 ---
 
@@ -566,6 +614,8 @@ src/
   utils.ts               Shared helpers (pageHasSelector, isLoginPage, waitForPortOpen)
   license.ts             License validation against Supabase
   login-dedup.ts         Login deduplication for multi-tab scenarios
+  nordvpn.ts             NordVPN CLI rotation (AUTO IP mode)
+  static-proxy.ts        Local CONNECT relay + proxies.txt round-robin (STATIC IP mode)
   types/
     third-party.d.ts     Type declarations for third-party modules
 
@@ -599,6 +649,7 @@ docs/                    Full documentation set (architecture, desktop, mobile, 
 
 config.example.json      Example config template
 config.local.json        User config (gitignored)
+proxies.txt              STATIC IP proxy list (gitignored — contains credentials)
 ARCHITECTURE.md          Technical architecture documentation (desktop)
 AGENTS.md                Product improvement notes and repository guidance
 ```
