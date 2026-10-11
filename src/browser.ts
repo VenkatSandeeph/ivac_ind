@@ -46,10 +46,11 @@ async function blockPageViewTelemetry(context: BrowserContext): Promise<void> {
   }
 }
 
-export async function launchBrowser(config: AutomationConfig): Promise<BrowserLaunch> {
+export async function launchBrowser(config: AutomationConfig, proxyUrl?: string): Promise<BrowserLaunch> {
   info('Launching Chrome with remote debugging');
 
   const launchArgs = [`--remote-debugging-port=${config.chromeRemoteDebugPort}`];
+  if (proxyUrl) launchArgs.push(`--proxy-server=${proxyUrl}`);
 
   const context = await chromium.launchPersistentContext(config.chromeUserDataDir, {
     executablePath: config.chromeExecutable,
@@ -70,7 +71,7 @@ export async function launchBrowser(config: AutomationConfig): Promise<BrowserLa
   return { browser, context, page };
 }
 
-export async function connectToBrowser(config: AutomationConfig): Promise<BrowserConnection | null> {
+export async function connectToBrowser(config: AutomationConfig, proxyUrl?: string): Promise<BrowserConnection | null> {
   // Attempt to connect to an existing Chrome CDP endpoint, launching
   // a local Chrome instance if necessary.
   const endpoint = `http://127.0.0.1:${config.chromeRemoteDebugPort}`;
@@ -94,6 +95,7 @@ export async function connectToBrowser(config: AutomationConfig): Promise<Browse
         '--no-first-run',
         '--no-default-browser-check'
       ];
+      if (proxyUrl) args.push(`--proxy-server=${proxyUrl}`);
 
       info(`Launching Chrome: ${chromeExe} ${args.join(' ')}`);
       const child = spawn(chromeExe, args, { detached: true, stdio: 'ignore' });
@@ -152,7 +154,7 @@ export async function connectToBrowser(config: AutomationConfig): Promise<Browse
   }
 }
 
-export async function ensureChromeRunning(config: AutomationConfig): Promise<boolean> {
+export async function ensureChromeRunning(config: AutomationConfig, proxyUrl?: string): Promise<boolean> {
   const port = config.chromeRemoteDebugPort;
   if (await waitForPortOpen(port, 1000)) return true;
 
@@ -177,6 +179,7 @@ export async function ensureChromeRunning(config: AutomationConfig): Promise<boo
         '--no-first-run',
         '--no-default-browser-check'
       ];
+      if (proxyUrl) args.push(`--proxy-server=${proxyUrl}`);
       const child = spawn(exe, args, { detached: true, stdio: 'ignore' });
       child.unref();
 

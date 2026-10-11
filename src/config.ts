@@ -12,6 +12,18 @@ export type NordVpnConfig = {
   ipCheckUrl: string;         // default 'https://api.ipify.org'
 };
 
+// IP egress mode — replaces the old autoRotateIp checkbox:
+//   'none'   — never rotate (soft blocks cool down on the same IP)
+//   'auto'   — NordVPN CLI rotation (machine-wide, all profiles share one IP)
+//   'static' — per-profile proxy relay fed by proxies.txt, round-robin on the
+//              same rotation triggers as 'auto'
+export type IpMode = 'none' | 'auto' | 'static';
+
+export type StaticProxyConfig = {
+  file: string;            // proxies.txt path (default: <cwd>/proxies.txt)
+  portOffset: number;      // relay port = chromeRemoteDebugPort + this (default 10000)
+};
+
 export type AppointmentConfig = {
   city: string | string[];
   month: string | number;
@@ -46,8 +58,10 @@ export type AutomationConfig = {
   maxDateAttempts: number;
   preferLeastSlots: boolean;
   autoRotateIp: boolean;
+  ipMode: IpMode;
   specialWindowOnly: boolean;
   nordvpn: NordVpnConfig;
+  staticProxy: StaticProxyConfig;
 };
 
 export type ProfileConfig = {
@@ -78,6 +92,7 @@ export type ProfileConfig = {
   maxDateAttempts?: number;
   preferLeastSlots?: boolean;
   autoRotateIp?: boolean;
+  ipMode?: IpMode;
   specialWindowOnly?: boolean;
   nordvpn?: Partial<NordVpnConfig>;
 };
@@ -103,6 +118,7 @@ export type SettingsConfig = {
   maxDateAttempts: number;
   preferLeastSlots: boolean;
   autoRotateIp: boolean;
+  ipMode: IpMode;
   specialWindowOnly: boolean;
   nordvpn: NordVpnConfig;
 };
@@ -169,6 +185,17 @@ function parseBoolean(value: unknown, fallback: boolean) {
     if (['false', '0', 'no'].includes(lower)) return false;
   }
   return fallback;
+}
+
+// Accepts 'none'/'no ip'/'off', 'auto'/'auto ip', 'static'/'static ip'.
+// When ipMode is absent (legacy configs), derives it from autoRotateIp so
+// existing installs keep their behavior: false→'none', true→'auto'.
+function parseIpMode(value: unknown, autoRotateIp: boolean): IpMode {
+  const v = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (v === 'none' || v === 'no ip' || v === 'off' || v === 'false') return 'none';
+  if (v === 'static' || v === 'static ip' || v === 'staticip') return 'static';
+  if (v === 'auto' || v === 'auto ip' || v === 'autoip' || v === 'true') return 'auto';
+  return autoRotateIp ? 'auto' : 'none';
 }
 
 function looksLikePlaceholder(value: string) {
@@ -305,6 +332,9 @@ function mergeWithDefaults(settings: Partial<SettingsConfig>, profile: ProfileCo
     ? profile.securityQuestions
     : [];
 
+  const legacyAutoRotate = parseBoolean(profile.autoRotateIp ?? settings.autoRotateIp ?? env.AUTO_ROTATE_IP, true);
+  const ipMode = parseIpMode(profile.ipMode ?? settings.ipMode ?? env.IP_MODE, legacyAutoRotate);
+
   const config: AutomationConfig = {
     authUrl: profile.authUrl ?? settings.authUrl ?? env.AUTH_URL ?? '',
     scheduleUrl:
@@ -347,11 +377,17 @@ function mergeWithDefaults(settings: Partial<SettingsConfig>, profile: ProfileCo
       parseNumber(profile.maxDateAttempts ?? settings.maxDateAttempts ?? env.MAX_DATE_ATTEMPTS, 3),
     preferLeastSlots:
       parseBoolean(profile.preferLeastSlots ?? settings.preferLeastSlots ?? env.PREFER_LEAST_SLOTS, false),
-    autoRotateIp:
-      parseBoolean(profile.autoRotateIp ?? settings.autoRotateIp ?? env.AUTO_ROTATE_IP, true),
+    // autoRotateIp is kept for backward compatibility and now means "rotation
+    // is allowed" — derived from ipMode ('none' = never rotate).
+    autoRotateIp: ipMode !== 'none',
+    ipMode,
     specialWindowOnly:
       parseBoolean(profile.specialWindowOnly ?? settings.specialWindowOnly ?? env.SPECIAL_WINDOW_ONLY, false),
-    nordvpn: mergeNordVpnConfig(profile.nordvpn, settings.nordvpn, env)
+    nordvpn: mergeNordVpnConfig(profile.nordvpn, settings.nordvpn, env),
+    staticProxy: {
+      file: env.STATIC_PROXY_FILE ?? path.resolve(process.cwd(), 'proxies.txt'),
+      portOffset: parseNumber(env.STATIC_PROXY_PORT_OFFSET, 10000)
+    }
   };
 
   return config;

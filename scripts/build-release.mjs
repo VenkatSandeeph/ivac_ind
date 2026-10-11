@@ -196,12 +196,31 @@ if (fs.existsSync(unpackedDir)) {
     }
   }
 
+  // proxies.txt holds live proxy credentials — never ship it inside the zip.
+  const proxiesInRelease = path.join(unpackedDir, "proxies.txt");
+  try { fs.unlinkSync(proxiesInRelease); } catch {}
+
   try { fs.unlinkSync(zipPath); } catch {}
   run(
     `powershell -NoProfile -Command "Compress-Archive -Path '${unpackedDir}\\*' -DestinationPath '${zipPath}' -Force"`
   );
   const zipSizeMB = (fs.statSync(zipPath).size / 1024 / 1024).toFixed(1);
   console.log("  Created: " + releaseDir + "/IVAC-Launcher.zip (" + zipSizeMB + " MB)");
+
+  // Convenience for local runs only: copy the dev proxies.txt into
+  // win-unpacked AFTER zipping so local testing works without a manual copy
+  // while the distributed zip stays credential-free.
+  const proxiesSrc = path.join(root, "proxies.txt");
+  if (fs.existsSync(proxiesSrc)) {
+    try {
+      fs.copyFileSync(proxiesSrc, proxiesInRelease);
+      console.log("  Copied proxies.txt into win-unpacked for local testing (not in zip)");
+    } catch {
+      console.warn("  Warning: could not copy proxies.txt into win-unpacked.");
+    }
+  } else {
+    console.log("  Note: no proxies.txt at project root — STATIC IP needs it next to IVAC Launcher.exe");
+  }
 } else {
   console.warn("\n[7/7] Skipped zip — " + releaseDir + "/win-unpacked not found.");
 }

@@ -41,8 +41,16 @@ import { sendSupabaseEvent } from './supabase';
 import { sendOfcBookedNotification } from './telegram';
 import { loadCheckpoint, saveCheckpoint, clearCheckpoint } from './checkpoint';
 import { info, warn, error, client, backendError, uiStatus } from './logger';
-import { pageHasSelector, isLoginPage } from './utils';
+import { pageHasSelector, isLoginPage, waitForPortOpen, waitForPortClosed } from './utils';
 import { readStoredLicenseKey, validateLicense } from './license';
+import {
+  startStaticProxy,
+  readRelayMarker,
+  writeRelayMarker,
+  clearRelayMarker,
+  STATIC_ROTATE_FLAG,
+  type StaticProxyRelay
+} from './static-proxy';
 import { setupApiResponseCapture, runDirectOfcFlow, resetCapturedScheduleData, getMemberQueryResult, resetMemberQueryResult, type DirectApiResult } from './api-direct';
 import { playBeep } from './beep';
 import { recordSlotObservation } from './slot-tracker';
@@ -239,7 +247,7 @@ async function recoverFromBlockPage(page: Page, config: any, reason: string | nu
     } catch (e) {
       warn('[HARD BLOCK] Cache clear failed (continuing):', e instanceof Error ? e.message : String(e));
     }
-    await rotateNordVpn(config.nordvpn, isAborted, false, `Hard block ${where}: Cloudflare IP block (persisted after home retry)`).catch(() => null);
+    await rotateEgress(config, isAborted, false, `Hard block ${where}: Cloudflare IP block (persisted after home retry)`).catch(() => null);
     await page.goto(getHomePageUrl(config.scheduleUrl), { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null);
     await waitForHumanVerificationIfNeeded(page, config.cloudflareWaitMs, config.autoSolveCloudflare, isAborted).catch(() => null);
     await page.waitForTimeout(3000);
@@ -258,7 +266,7 @@ async function recoverFromBlockPage(page: Page, config: any, reason: string | nu
   } catch (e) {
     warn('[HARD BLOCK] Cache clear failed (continuing):', e instanceof Error ? e.message : String(e));
   }
-  await rotateNordVpn(config.nordvpn, isAborted, false, `Hard block ${where}: ${reasonLabel}`).catch(() => null);
+  await rotateEgress(config, isAborted, false, `Hard block ${where}: ${reasonLabel}`).catch(() => null);
   await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(async () => {
     info('[HARD BLOCK] Reload failed, navigating to schedule URL directly.');
     await page.goto(config.scheduleUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null);
@@ -314,6 +322,10 @@ async function runConsularStageWithRecovery(
       info('Stop signal detected during consular monitoring; exiting consular stage.');
       return false;
     }
+
+    // Static IP: honor the UI Rotate IP flag during consular monitoring too —
+    // the consular stage has its own loop that never returns to the OFC loop.
+    await consumeStaticRotateFlag(config);
 
     // Ensure we're on the consular schedule page
     const onConsular = await isConsularSchedulePage(page).catch(() => false);
@@ -376,7 +388,7 @@ async function runConsularStageWithRecovery(
         if (consecutive403 >= 3) {
           if (config.autoRotateIp) {
             info('[NORDVPN] Consular 403 ×3 — rotating NordVPN IP.');
-            await rotateNordVpn(config.nordvpn, isAborted, false, 'Consular stage: 3 consecutive 403 blocks').catch(() => null);
+            await rotateEgress(config, isAborted, false, 'Consular stage: 3 consecutive 403 blocks').catch(() => null);
             // Reload the page to clear stale Cloudflare session after IP rotation.
             client('🔄', 'Refreshing page after IP rotation...');
             await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null);
@@ -853,6 +865,148 @@ async function waitForRunWindowIfNeeded(config: AutomationConfig): Promise<boole
   return false;
 }
 
+// ---------------------------------------------------------------------------
+//  Static IP mode — per-profile proxy relay (see src/static-proxy.ts)
+// ---------------------------------------------------------------------------
+// Chrome launches once with --proxy-server=http://127.0.0.1:<relayPort>; the
+// relay tunnels to the current upstream. Rotation swaps the upstream pointer —
+// no Chrome restart. Trigger sites call rotateEgress(), which dispatches to
+// the relay in 'static' mode and NordVPN in 'auto' mode.
+let staticRelay: StaticProxyRelay | null = null;
+let lastRotateFlagMs = 0;
+
+function rotateFlagMtime(): number {
+  try {
+    return fs.statSync(STATIC_ROTATE_FLAG).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
+/** Consume the UI's Rotate IP request flag — each static core advances once per new mtime. */
+async function consumeStaticRotateFlag(config: AutomationConfig): Promise<void> {
+  if (config.ipMode !== 'static' || !staticRelay) return;
+  const m = rotateFlagMtime();
+  if (m > lastRotateFlagMs) {
+    lastRotateFlagMs = m;
+    info('[STATIC IP] Manual Rotate IP — advancing proxy round-robin');
+    await staticRelay.rotate('manual Rotate IP button');
+  }
+}
+
+/** Unified rotation entry — 'static' swaps the relay upstream; 'auto' runs NordVPN. */
+async function rotateEgress(
+  config: AutomationConfig,
+  aborted: () => boolean,
+  force: boolean,
+  reason?: string
+): Promise<unknown> {
+  if (config.ipMode === 'static') {
+    if (!staticRelay) {
+      warn('[STATIC IP] rotation requested but relay is not running');
+      return null;
+    }
+    return staticRelay.rotate(reason || 'rotation trigger');
+  }
+  return rotateNordVpn(config.nordvpn, aborted, force, reason).catch(() => null);
+}
+
+/** Last-resort Chrome kill: find the PID listening on the debug port via netstat. */
+async function killProcessOnPort(port: number): Promise<boolean> {
+  try {
+    const out = await new Promise<string>((resolve) => {
+      execCmd('netstat -ano -p tcp', { windowsHide: true, timeout: 15000 }, (_e, stdout) => resolve(stdout || ''));
+    });
+    for (const line of out.split(/\r?\n/)) {
+      if (!line.includes('LISTENING')) continue;
+      const m = line.match(/:(\d+)\s+\S+\s+LISTENING\s+(\d+)/);
+      if (m && parseInt(m[1], 10) === port) {
+        info(`[STATIC IP] Force-killing PID ${m[2]} listening on debug port ${port}`);
+        await new Promise((r) => execCmd(`taskkill /pid ${m[2]} /F`, { windowsHide: true }, () => r(null)));
+        return true;
+      }
+    }
+  } catch {
+    /* best-effort */
+  }
+  return false;
+}
+
+/**
+ * Static-mode Chrome bring-up. If a Chrome is already on the debug port but was
+ * NOT launched through this relay (no marker / different port), close it and
+ * respawn with --proxy-server. A matching marker means the existing Chrome
+ * already tunnels through our just-bound relay — safe to reuse.
+ */
+async function ensureStaticModeChrome(
+  config: AutomationConfig,
+  proxyUrl: string,
+  relayPort: number,
+  proxyLabel: string
+): Promise<void> {
+  const port = config.chromeRemoteDebugPort;
+  if (await waitForPortOpen(port, 1500)) {
+    const marker = readRelayMarker(config);
+    if (marker && marker.relayPort === relayPort) {
+      info(`[STATIC IP] Reusing existing Chrome — already bound to relay 127.0.0.1:${relayPort}`);
+      return;
+    }
+    warn('[STATIC IP] Chrome running without the proxy relay — relaunching through the proxy...');
+    const conn = await connectToBrowser(config).catch(() => null);
+    let closed = false;
+    if (conn) {
+      try {
+        await conn.browser.close();
+        closed = true;
+      } catch {
+        closed = false;
+      }
+    }
+    if (!closed) {
+      warn('[STATIC IP] CDP close failed — force-killing Chrome via debug port');
+      await killProcessOnPort(port);
+    }
+    await waitForPortClosed(port, 15000);
+  }
+  const spawned = await ensureChromeRunning(config, proxyUrl);
+  if (spawned) writeRelayMarker(config, relayPort, proxyLabel);
+}
+
+/**
+ * On graceful stop, respawn the profile's Chrome WITHOUT the proxy — the relay
+ * dies with this process, and a Chrome left pointing at it goes offline.
+ * (taskkill /F path can't be intercepted; this covers the flag-file stop.)
+ */
+async function relaunchChromeDirect(config: AutomationConfig): Promise<void> {
+  info('[STATIC IP] Stop: relaunching Chrome direct (no proxy) so the tab stays usable...');
+  const port = config.chromeRemoteDebugPort;
+  const conn = await connectToBrowser(config).catch(() => null);
+  let closed = false;
+  if (conn) {
+    try {
+      await conn.browser.close();
+      closed = true;
+    } catch {
+      closed = false;
+    }
+  }
+  if (!closed) await killProcessOnPort(port);
+  await waitForPortClosed(port, 15000);
+  await ensureChromeRunning(config);
+  clearRelayMarker(config);
+}
+
+/** Graceful stop entry point — static mode re-launches Chrome direct first. */
+async function gracefulExit(config: AutomationConfig): Promise<never> {
+  if (config.ipMode === 'static') {
+    await relaunchChromeDirect(config).catch((e) =>
+      warn('[STATIC IP] direct relaunch on stop failed:', e instanceof Error ? e.message : String(e))
+    );
+  }
+  client('🛑', 'Script stopped');
+  process.exit(0);
+}
+
 async function isSecurityQuestionPage(page: any) {
   return (
     (await pageHasSelector(page, 'p.textInParagraph[id^="kbq"]')) &&
@@ -1113,12 +1267,23 @@ async function main() {
     info('Loaded previous checkpoint', previousCheckpoint);
   }
 
+  // Static IP mode: start the local relay + claim/verify an upstream BEFORE
+  // Chrome, so the browser launches already pointing through the proxy.
+  let chromeProxyUrl: string | undefined;
+  if (config.ipMode === 'static') {
+    const started = await startStaticProxy(config); // throws on missing/dead proxies.txt
+    staticRelay = started.relay;
+    chromeProxyUrl = started.proxyUrl;
+    lastRotateFlagMs = rotateFlagMtime(); // don't react to a flag older than this run
+    await ensureStaticModeChrome(config, started.proxyUrl, started.relayPort, started.proxyLabel);
+  }
+
   // Ensure Chrome is running and exposing the CDP port; attempt to start it if not.
-  await ensureChromeRunning(config).catch(() => null);
-  const browserLaunch = await connectToBrowser(config);
+  await ensureChromeRunning(config, chromeProxyUrl).catch(() => null);
+  const browserLaunch = await connectToBrowser(config, chromeProxyUrl);
   let isExistingBrowser = browserLaunch?.existing === true;
   let { browser, context, page } =
-    browserLaunch ?? await launchBrowser(config);
+    browserLaunch ?? await launchBrowser(config, chromeProxyUrl);
 
   monitorNetwork(page, config.debugNetwork);
   setupApiResponseCapture(page);
@@ -1191,17 +1356,18 @@ async function main() {
     // Check for graceful stop signal (from UI Stop button)
     if (checkStopSignal()) {
       info('[STOPPED] Stop signal received. Script stopping (Chrome will stay open).');
-      client('🛑', 'Script stopped');
-      process.exit(0);
+      await gracefulExit(config);
     }
+
+    // Static IP: UI Rotate IP button → advance this profile's proxy round-robin.
+    await consumeStaticRotateFlag(config);
 
     // Special Window gate — evaluated once per loop iteration, so an
     // in-flight booking always finishes before the pause takes effect
     // ("finish, then pause").
     if (specialWindowEnabled(config) && (await waitForRunWindowIfNeeded(config))) {
       info('[STOPPED] Stop signal received during Special Window pause. Script stopping.');
-      client('🛑', 'Script stopped');
-      process.exit(0);
+      await gracefulExit(config);
     }
 
     attempt += 1;
@@ -1554,7 +1720,7 @@ async function main() {
           // Third consecutive 403/429 — the session/IP is likely burned.
           warn(`HTTP ${blockType} received for ${consecutiveBlockCount} consecutive cities. Forcing NordVPN IP rotation.`);
           uiStatus('Rotating IP');
-          await rotateNordVpn(config.nordvpn, isAborted, true, `OFC schedule API ${blockType} ×${consecutiveBlockCount} across consecutive cities`).catch(() => null);
+          await rotateEgress(config, isAborted, true, `OFC schedule API ${blockType} ×${consecutiveBlockCount} across consecutive cities`).catch(() => null);
 
           // Reload the page to clear stale Cloudflare session after IP rotation.
           client('🔄', 'Refreshing page after IP rotation...');
@@ -1744,7 +1910,7 @@ async function main() {
           warn(`[APP_ERROR] ${consecutiveAppErrorCount} consecutive app errors — forcing NordVPN IP rotation.`);
           client('🔄', 'Repeated server errors — rotating IP…');
           uiStatus('Rotating IP');
-          await rotateNordVpn(config.nordvpn, isAborted, true, `OFC app error ${code} ×${consecutiveAppErrorCount}`).catch(() => null);
+          await rotateEgress(config, isAborted, true, `OFC app error ${code} ×${consecutiveAppErrorCount}`).catch(() => null);
           await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null);
           await waitForHumanVerificationIfNeeded(page, config.cloudflareWaitMs, config.autoSolveCloudflare, isAborted).catch(() => null);
           resetMemberQueryResult();
@@ -2159,8 +2325,7 @@ async function main() {
             // Exit directly — checkStopSignal() already consumed the file, so
             // merely continuing would swallow the stop and keep the loop alive.
             info('Stop signal detected during calendar recovery; aborting.');
-            client('🛑', 'Script stopped');
-            process.exit(0);
+            await gracefulExit(config);
           }
           try {
             info(`Recovery attempt ${rec + 1}/3: reselecting city and checking calendar`);
@@ -2770,4 +2935,9 @@ async function main() {
   }
 }
 
-main();
+main().catch((e) => {
+  const msg = e instanceof Error ? e.message : String(e);
+  error('Fatal error:', msg);
+  client('⚠️', `Startup failed: ${msg}`);
+  process.exit(1);
+});

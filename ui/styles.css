@@ -676,6 +676,16 @@ button.small {
   cursor: pointer;
   accent-color: var(--accent, #3b82f6);
 }
+.ip-mode-select {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 4px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: #fff;
+  color: inherit;
+}
 
 .edit-list {
   display: flex;

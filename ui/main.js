@@ -34,6 +34,10 @@ const STOP_SIGNAL_FILE_BASE = path.join(PROJECT_ROOT, '.ivac-stop');
 // cores read this each loop iteration — "on"/"off" — so the checkbox pauses
 // and resumes profiles without a restart.
 const SPECIAL_WINDOW_FLAG_FILE = path.join(PROJECT_ROOT, '.ivac-special-window');
+// Static IP mode: the UI writes this flag to ask every running static-profile
+// core to advance its proxy round-robin (each checks the file mtime per loop).
+const STATIC_ROTATE_FLAG_FILE = path.join(PROJECT_ROOT, '.ivac-rotate-static');
+const STATIC_LAST_IP_FILE = path.join(PROJECT_ROOT, '.ivac-static-last-ip');
 const MAX_LOG_SIZE = 500_000;
 
 // Ordered country → city rotation sequence for the manual Rotate IP button
@@ -198,6 +202,7 @@ function getDefaultConfig() {
       maxDateAttempts: 3,
       preferLeastSlots: false,
       autoRotateIp: true,
+      ipMode: 'auto',
       nordvpn: {
         exePath: 'C:\\Program Files\\NordVPN\\nordvpn.exe',
         connectTimeoutMs: 30000,
@@ -861,6 +866,14 @@ const apiServer = http.createServer(async (req, res) => {
     }
     if (typeof body.autoRotateIp === 'boolean') {
       cfg.settings.autoRotateIp = body.autoRotateIp;
+      // Legacy checkbox callers — keep ipMode in sync.
+      cfg.settings.ipMode = body.autoRotateIp ? 'auto' : 'none';
+    }
+    // IP mode dropdown: 'none' | 'auto' | 'static'. autoRotateIp stays mirrored
+    // so older cores reading the boolean keep working.
+    if (typeof body.ipMode === 'string' && ['none', 'auto', 'static'].includes(body.ipMode)) {
+      cfg.settings.ipMode = body.ipMode;
+      cfg.settings.autoRotateIp = body.ipMode !== 'none';
     }
     if (typeof body.specialWindowOnly === 'boolean') {
       cfg.settings.specialWindowOnly = body.specialWindowOnly;
@@ -1026,6 +1039,23 @@ const apiServer = http.createServer(async (req, res) => {
   if (url === '/api/rotate-ip' && req.method === 'POST') {
     try {
       const cfg = migrateLegacyConfig(readConfig());
+      // STATIC IP mode: rotation happens inside each running core's proxy
+      // relay. Signal them via the flag file — each static profile advances
+      // its own round-robin. Nothing to do if no static profile is running.
+      const ipMode = (cfg && cfg.settings && cfg.settings.ipMode) ||
+        (cfg && cfg.settings && cfg.settings.autoRotateIp === false ? 'none' : 'auto');
+      if (ipMode === 'static') {
+        try {
+          fs.writeFileSync(STATIC_ROTATE_FLAG_FILE, String(Date.now()));
+          return jsonResponse(res, {
+            ok: true,
+            ip: null,
+            msg: 'Static IP rotation queued — running STATIC IP profiles advance to their next proxy.'
+          });
+        } catch (e) {
+          return jsonResponse(res, { ok: false, msg: 'Failed to write rotate flag: ' + e.message }, 500);
+        }
+      }
       const nordvpnCfg = (cfg && cfg.settings && cfg.settings.nordvpn) || {
         exePath: 'C:\\Program Files\\NordVPN\\nordvpn.exe',
         connectTimeoutMs: 30000,
@@ -1151,7 +1181,12 @@ const apiServer = http.createServer(async (req, res) => {
 
   // Get current NordVPN IP
   if (url === '/api/current-ip' && req.method === 'GET') {
-    const ipFile = path.join(PROJECT_ROOT, '.ivac-nordvpn-current-ip');
+    // Static mode: each profile writes its last verified egress IP here.
+    const cfgForMode = migrateLegacyConfig(readConfig());
+    const modeForIp = (cfgForMode && cfgForMode.settings && cfgForMode.settings.ipMode) || 'auto';
+    const ipFile = modeForIp === 'static'
+      ? STATIC_LAST_IP_FILE
+      : path.join(PROJECT_ROOT, '.ivac-nordvpn-current-ip');
     try {
       if (fs.existsSync(ipFile)) {
         const ip = fs.readFileSync(ipFile, 'utf8').trim();

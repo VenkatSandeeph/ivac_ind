@@ -107,6 +107,20 @@ All ivac-core processes (all profiles share one IP)
 - **City sequence is per-process.** `rotationIndex` is in-memory — each ivac-core process (and the UI's manual rotate) starts at US city 1. After the last city (Costa Rica / San Jose) it wraps to US city 1.
 - **Initial check on first profile start** — verifies NordVPN exe exists. Subsequent starts skip the check.
 
+### IP Modes & Static Proxy Relay (Static IP)
+
+The UI's `IP Mode` dropdown (`ui/index.html`) selects `ipMode: 'none' | 'auto' | 'static'` per profile (`src/config.ts`). `none`/`auto` map to legacy `autoRotateIp` false/true (kept mirrored for compat; `ipMode` wins when both present). Effective mode: `profile.ipMode ?? settings.ipMode`.
+
+`static` mode (`src/static-proxy.ts`) launches Chrome through a **local CONNECT relay** (`127.0.0.1:<debugPort+10000>`, e.g. 9222→19222) that tunnels every request to the currently selected upstream proxy from `proxies.txt` (project root, gitignored; `host:port:user:pass` per line, `#` comments, optional `http://`/`socks5://` prefix — only `http` is implemented; `dialUpstream` is the seam to extend).
+
+- **Round-robin**: shared `.ivac-proxy-index` (project root) + `.ivac-proxy-lock` O_EXCL spin — all running profiles advance one global pointer; each rotation verifies the candidate (`CONNECT api.ipify.org:443` → logged egress IP), skipping dead proxies with a full-cycle circuit breaker.
+- **Rotation triggers**: all `rotateNordVpn` call sites route through `rotateEgress()` in `index.ts` — `auto`→NordVPN, `static`→`relay.rotate()`. Strike ladders unchanged.
+- **Manual Rotate IP**: `ui/main.js` `/api/rotate-ip` writes `.ivac-rotate-static` flag → core polls it each loop iteration (OFC and consular loops) → `relay.rotate(manual)`. Observed IP lands in `.ivac-static-last-ip` for the button subtext.
+- **Existing-Chrome mismatch**: on start, if `chrome-debug-<port>` is up but `.ivac-relay.json` marker (inside userDataDir) is absent/mismatched → kill + relaunch proxied. CDP `/json` close first, `netstat` PID fallback.
+- **Stop**: `gracefulStopForStatic()` kills Chrome + relay, waits for the debug port to close (`waitForPortClosed` in `utils.ts`), respawns Chrome **direct** so the still-open session stays usable. The taskkill /F emergency path cannot be intercepted.
+- **Caveat**: only Chrome traffic is proxied — node-side calls (license, Telegram, Supabase) go direct even in static mode (unlike NordVPN which is machine-wide). Each static profile gets its own egress; Decodo-style ports are sticky sessions (port 10001 = one IP).
+- `test-static-proxy.js` (root, dev tool, needs `npm run build` first) exercises parse → verify → relay → rotate end-to-end.
+
 ### Telegram OFC Success Notification
 
 The Telegram module (`src/telegram.ts`) sends a formatted HTML message to a hardcoded Telegram channel when OFC is successfully submitted.

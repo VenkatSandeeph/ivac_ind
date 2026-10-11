@@ -34,8 +34,12 @@
         <label class="header-check" title="When checked, picks the least-available time slot instead of the most-available one. Applies on next profile start.">
           <input type="checkbox" id="leastSlotsChk" /> Less Slots
         </label>
-        <label class="header-check" title="When checked, the IP rotates automatically on blocks (403/Cloudflare). When unchecked, IP never rotates automatically — 403s cool down on the same IP and a hard IP block stops the profile. Manual Rotate IP still works. Applies on next profile start.">
-          <input type="checkbox" id="autoIpChk" checked /> Auto IP
+        <label class="header-check" title="NO IP: never rotate — 403s cool down on the same IP and a hard block stops the profile. AUTO IP: NordVPN rotation (all profiles share one machine IP). STATIC IP: each profile runs through proxies.txt and rotates round-robin on the same triggers. Manual Rotate IP works in AUTO and STATIC modes. Applies on next profile start.">
+          IP <select id="ipModeSel" class="ip-mode-select">
+            <option value="none">NO IP</option>
+            <option value="auto" selected>AUTO IP</option>
+            <option value="static">STATIC IP</option>
+          </select>
         </label>
         <label class="header-check" id="specialWindowLabel" title="When checked, profiles run only during :20–:30 and :50–:00 system-clock windows each hour and freeze between them. Applies live to running profiles.">
           <input type="checkbox" id="specialWindowChk" /> Special Window

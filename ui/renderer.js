@@ -235,9 +235,10 @@ async function loadProfiles() {
     }
 
     // Sync header "Auto IP" checkbox (defaults to on when unset)
-    const autoIpChk = document.getElementById('autoIpChk');
-    if (autoIpChk && !appState.autoIpSaving) {
-      autoIpChk.checked = appState.settings.autoRotateIp !== false;
+    const ipModeSel = document.getElementById('ipModeSel');
+    if (ipModeSel && !appState.ipModeSaving) {
+      ipModeSel.value = appState.settings.ipMode ||
+        (appState.settings.autoRotateIp === false ? 'none' : 'auto');
     }
 
     // Sync header "Special Window" checkbox with persisted setting
@@ -435,7 +436,7 @@ async function rotateIP() {
       if (btn) btn.disabled = false;
       return;
     }
-    if (sub) sub.textContent = data.ip || '—';
+    if (sub) sub.textContent = data.ip || 'Queued';
     if (btn) btn.disabled = false;
   } catch {
     if (sub) sub.textContent = 'Failed';
@@ -847,27 +848,30 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // Header "Auto IP" checkbox — persisted in config.local.json settings,
-  // applied on next profile start (cores read config at spawn).
-  document.getElementById('autoIpChk')?.addEventListener('change', async (e) => {
-    const checked = !!e.target.checked;
-    appState.autoIpSaving = true;
-    appState.settings.autoRotateIp = checked;
+  // Header IP mode dropdown (NO IP / AUTO IP / STATIC IP) — persisted in
+  // config.local.json settings, applied on next profile start.
+  document.getElementById('ipModeSel')?.addEventListener('change', async (e) => {
+    const mode = e.target.value;
+    const prev = appState.settings.ipMode || (appState.settings.autoRotateIp === false ? 'none' : 'auto');
+    appState.ipModeSaving = true;
+    appState.settings.ipMode = mode;
+    appState.settings.autoRotateIp = mode !== 'none';
     try {
       const res = await fetch('/api/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ autoRotateIp: checked })
+        body: JSON.stringify({ ipMode: mode })
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.ok) throw new Error(data.msg || 'save failed');
-      debugLog('autoRotateIp saved: ' + checked);
+      debugLog('ipMode saved: ' + mode);
     } catch (err) {
-      console.error('Failed to save autoRotateIp:', err);
-      e.target.checked = !checked;
-      appState.settings.autoRotateIp = !checked;
+      console.error('Failed to save ipMode:', err);
+      e.target.value = prev;
+      appState.settings.ipMode = prev;
+      appState.settings.autoRotateIp = prev !== 'none';
     } finally {
-      appState.autoIpSaving = false;
+      appState.ipModeSaving = false;
     }
   });
 
