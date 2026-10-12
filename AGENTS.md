@@ -41,6 +41,17 @@ The direct API module (`src/api-direct.ts`) uses 3 tiers to submit appointments 
 3. **Tier 3: Fast DOM + response capture** (~2-3s) -- Clicks date cell, captures page's own API response, submits via DOM. Zero extra API requests.
 4. **Fallback: Standard DOM flow** (~7-10s) -- Full DOM rendering waits. Most reliable but slowest.
 
+### Submit Failure Handling (fast-flow contention)
+
+Observed during a real slot drop (NEW DELHI, :56 window): submits returned HTTP 200 `HasError` — "The selected appointment time is no longer available" — after **14-25s** of server-side latency, and the page itself then fired a **fresh `getScheduleEntries` + its own auto-resubmit** of the dead slot.
+
+- **`slot_gone` classification** — `submitViaPageFunction` tags that error `code:'slot_gone'`. The success path is untouched (`responseTimeoutMs` stays 60s/30s — loaded servers deliver success slowly; failures already arrive fast via their error response).
+- **Same-date retry** — on `slot_gone`, `runDomFastFlow` waits for in-flight submits to drain (`waitForSubmitQuiesce`, 8s), grabs the page's post-failure entries refresh (`waitForNextEntriesCapture` via `entriesCaptureGen`), and submits **one** different seat-eligible slot on the same date before moving on.
+- **In-flight tracking** — `pendingOfcSubmits` counts `appointments-for-family` requests (increment on request, decrement on response or `requestfailed`) so retries/wire replay never race the page's own auto-resubmit.
+- **Wire replay gating + fresh token** — `runWireBookingFlow` now waits for submit quiesce (8s) and prefers `capturedEntriesToken` over the days-level `capturedScheduleToken`; the stale days token caused `PSE0601` on every wire call.
+
+**Lessons learned:** the page auto-refreshes entries after a failed submit (a stale-token assumption was wrong); submit failures are contention losses, not bugs — act on the error response, don't shorten the success timeout; wire replay must never run against a session with submits in flight.
+
 ### Special Windows (slot-drop timing)
 
 `SPECIAL_WINDOW_TRIGGERS_SEC` in `src/index.ts` — observed slot-drop trigger times at **second :58** of minutes **12, 25, 29, 36, 49, 55, 59**, every hour, on the **local system clock** (fires when the machine's time hits `HH:MM:58`; NOT server UTC).
@@ -288,6 +299,8 @@ The "Slot Pattern" button in the topbar (next to "Edit Profiles") opens a popup 
 - **Initial delay before first XHR.** Wait 500-1000ms after the page's `getScheduleDays` before calling `getScheduleEntries` to avoid request burst detection.
 - **jQuery-first approach.** Always try `window.jQuery.ajax()` before raw XHR. jQuery inherits all page-configured headers and tokens.
 - **Fast DOM fallback.** When API calls are blocked, click the date cell to trigger the page's own `getScheduleEntries`, capture the response, and submit via DOM. This makes zero extra API requests.
+- **The page auto-resubmits.** After a failed submit the site fires its own `getScheduleEntries` refresh AND a second submit of the dead slot. Always drain `pendingOfcSubmits` before our retry or wire replay.
+- **Tokens are per-response.** Replay calls must use the freshest captured token (`capturedEntriesToken`), not the days-level token — a stale token returns PSE0601 with HTTP 200.
 
 ## 8. NordVPN Development Notes
 - **Machine-wide VPN.** All running profiles share ONE NordVPN IP. A block on one profile affects all profiles. This is a fundamental tradeoff vs the old per-profile Decodo proxy.

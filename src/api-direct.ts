@@ -103,6 +103,12 @@ let capturedScheduleToken: string | null = null;
 let capturedScheduleEntries: ScheduleEntry[] | null = null;
 let capturedEntriesToken: string | null = null;
 let entriesCapturedResolve: ((value: boolean) => void) | null = null;
+// Bumps on every successful entries capture — lets us tell a fresh
+// post-submit-failure refresh apart from a stale capture.
+let entriesCaptureGen = 0;
+// In-flight schedule-ofc-appointments-for-family POSTs (ours + the page's
+// own auto-resubmits after a failed submit).
+let pendingOfcSubmits = 0;
 
 let sessionApiCallCount = 0;
 let sessionStartTime = Date.now();
@@ -185,11 +191,22 @@ export function setupApiResponseCapture(page: Page): void {
         info(`[FAST FLOW] Post data: ${postData}`);
         info(`[FAST FLOW] ===== END PAGE REQUEST =====`);
       } else if (url.includes('schedule-ofc-appointments-for-family')) {
+        pendingOfcSubmits++;
         // Log every submit request — critical for debugging booking failures
         info(`[FAST FLOW] ===== PAGE SUBMIT REQUEST =====`);
         info(`[FAST FLOW] Route: ${shortRoute}, Method: ${request.method()}`);
         info(`[FAST FLOW] Post data: ${postData}`);
         info(`[FAST FLOW] ===== END PAGE SUBMIT REQUEST =====`);
+      }
+    } catch { /* ignore */ }
+  });
+
+  // A submit that fails at transport level never reaches the response
+  // listener — drain the pending counter here too.
+  page.on('requestfailed', (request: Request) => {
+    try {
+      if (request.url().includes('schedule-ofc-appointments-for-family')) {
+        pendingOfcSubmits = Math.max(0, pendingOfcSubmits - 1);
       }
     } catch { /* ignore */ }
   });
@@ -316,6 +333,7 @@ export function setupApiResponseCapture(page: Page): void {
           }));
           capturedScheduleEntries = entries;
           capturedEntriesToken = String(data.Token || '');
+          entriesCaptureGen++;
           info(`[FAST FLOW] Captured ${entries.length} schedule entry(ies) + token (len=${capturedEntriesToken.length}) from getScheduleEntries`);
           // Resolve any pending waiter
           if (entriesCapturedResolve) {
@@ -331,6 +349,7 @@ export function setupApiResponseCapture(page: Page): void {
 
       // Log submit response — critical for debugging booking results
       if (url.includes('schedule-ofc-appointments-for-family') || url.includes('appointments-for-family')) {
+        pendingOfcSubmits = Math.max(0, pendingOfcSubmits - 1);
         try {
           const body = await response.text().catch(() => '');
           const status = response.status();
@@ -392,6 +411,41 @@ function getCapturedEntriesSnapshot(): { entries: ScheduleEntry[]; token: string
   const token = capturedEntriesToken || '';
   if (!entries) return null;
   return { entries, token };
+}
+
+/**
+ * Wait for a NEW entries capture that arrives AFTER `sinceGen` — used by the
+ * same-date retry to grab the page's own post-submit-failure refresh
+ * (verified: the site auto-refreshes getScheduleEntries ~1s after a failed
+ * submit, yielding fresh slots + a fresh token).
+ */
+function waitForNextEntriesCapture(sinceGen: number, timeoutMs: number): Promise<boolean> {
+  if (entriesCaptureGen > sinceGen) return Promise.resolve(true);
+  return new Promise(resolve => {
+    const timer = setTimeout(() => {
+      entriesCapturedResolve = null;
+      resolve(false);
+    }, timeoutMs);
+    entriesCapturedResolve = () => {
+      clearTimeout(timer);
+      resolve(true);
+    };
+  });
+}
+
+/**
+ * Wait until no schedule-ofc-appointments-for-family POSTs are in flight.
+ * After a failed submit the site fires its OWN auto-resubmit; starting our
+ * retry (or the wire replay) while that is still outstanding races the page
+ * and can poison the session/token context.
+ */
+async function waitForSubmitQuiesce(timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (pendingOfcSubmits === 0) return true;
+    await new Promise(r => setTimeout(r, 150));
+  }
+  return pendingOfcSubmits === 0;
 }
 
 // =============================================================================
@@ -848,7 +902,7 @@ async function submitViaPageFunction(
   entry: ScheduleEntry,
   _token: string,
   opts?: { responseTimeoutMs?: number }
-): Promise<{ success: boolean; error?: string; redirectStub?: string }> {
+): Promise<{ success: boolean; error?: string; code?: 'slot_gone'; redirectStub?: string }> {
   const submitStart = Date.now();
   const responseTimeoutMs = opts?.responseTimeoutMs ?? 30000;
 
@@ -1055,7 +1109,11 @@ async function submitViaPageFunction(
           const errMsg = parsed.Errors?.m_StringValue || 'unknown error';
           warn(`[FAST FLOW] Phase 3: submit FAILED — ${errMsg}`);
           client('❌', `Submit failed: ${errMsg}`);
-          return { success: false, error: errMsg };
+          // 'slot_gone' = the slot was taken by someone else between our
+          // entries read and our submit. The date may still have inventory —
+          // the caller retries on the page's post-failure entries refresh.
+          const code = /no longer available/i.test(errMsg) ? 'slot_gone' as const : undefined;
+          return { success: false, error: errMsg, code };
         }
         if (parsed.AllScheduled) {
           info(`[FAST FLOW] Phase 3: submit SUCCESS (AllScheduled=true) in ${elapsed}ms`);
@@ -1271,9 +1329,13 @@ async function runWireBookingFlow(
   matchingDates: ScheduleDay[],
   config: AutomationConfig
 ): Promise<DirectApiResult | null> {
-  const daysToken = capturedScheduleToken || '';
+  // Prefer the freshest captured token. The days-level token captured at
+  // city-select time is consumed long before wire replay runs — replaying
+  // with it produced PSE0601 on every call. Each entries response carries
+  // a fresh token, so the entries token is the live one by this point.
+  const daysToken = capturedEntriesToken || capturedScheduleToken || '';
   if (!daysToken) {
-    info('[WIRE FLOW] No captured days Token (T1) — cannot replay entries calls');
+    info('[WIRE FLOW] No captured Token — cannot replay entries calls');
     return null;
   }
 
@@ -1469,48 +1531,82 @@ export async function runDirectOfcFlow(page: Page, config: AutomationConfig): Pr
     // Phase 3: Submit the BEST slot for this date.
     //
     // STRATEGY: Try only the best (highest-availability) slot per date.
-    // After a failed submit, the Token from getScheduleEntries is consumed.
-    // Re-clicking the SAME date doesn't trigger a new getScheduleEntries call
-    // (the date is already selected). But clicking a DIFFERENT date does.
-    // So instead of burning through all slots on one date with a stale Token,
-    // we try the best slot on each date, moving to the next date on failure.
+    // After a failed submit the Token is consumed AND the page fires its
+    // own entries refresh + auto-resubmit — so instead of re-submitting a
+    // stale selection we take ONE extra shot at a different slot from the
+    // page's fresh capture (see the slot_gone retry below), then move on.
+    // Clicking a DIFFERENT date triggers a new getScheduleEntries call;
+    // re-clicking the same date does not.
     //
     // If only 1 date is available and it fails, we return all_exhausted so
     // the caller re-selects the city (full refresh, new getScheduleDays).
     const entry = eligibleEntries[0]; // best seat-eligible slot
-    info(`[FAST FLOW] Submitting best slot for ${date.Date.substring(0, 10)}: '${entry.Time}' (Num=${entry.Num}, avail=${entry.EntriesAvailable})`);
-    client('⏳', `Submitting OFC appointment for ${date.Date.substring(0, 10)} at ${entry.Time}...`);
+    const dateStr10 = date.Date.substring(0, 10);
+    info(`[FAST FLOW] Submitting best slot for ${dateStr10}: '${entry.Time}' (Num=${entry.Num}, avail=${entry.EntriesAvailable})`);
+    client('⏳', `Submitting OFC appointment for ${dateStr10} at ${entry.Time}...`);
 
     if (config.dryRun) {
       info(`[FAST FLOW] DRY RUN — skipping submit for '${entry.Time}'`);
       return { success: true, fallback: false, bookedDate: date.Date, bookedTime: entry.Time };
     }
 
+    const confirmBooking = async (r: { redirectStub?: string }, d: ScheduleDay, e: ScheduleEntry): Promise<DirectApiResult> => {
+      const elapsed = Date.now() - flowStart;
+      info(`[FAST FLOW] *** OFC BOOKED in ${elapsed}ms *** Date=${d.Date.substring(0, 10)} Time=${e.Time}`);
+      if (r.redirectStub) {
+        const redirectUrl = `/en-US/${r.redirectStub}`;
+        info(`[FAST FLOW] Navigating to ${redirectUrl}`);
+        await page.goto(redirectUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null);
+      }
+      return { success: true, fallback: false, redirectStub: r.redirectStub, bookedDate: d.Date, bookedTime: e.Time };
+    };
+
     // First date gets 60s timeout (server can take 100+ seconds, but we
-    // can't wait that long). Subsequent dates get 30s.
+    // can't wait that long). Subsequent dates get 30s. Do NOT shorten —
+    // a loaded server still delivers success slowly; failures already
+    // arrive fast and are handled by their error response, not timeouts.
     const responseTimeoutMs = di === 0 ? 60000 : 30000;
     const result = await submitViaPageFunction(page, entry, entriesResult.token, { responseTimeoutMs });
 
     if (result.success) {
-      const elapsed = Date.now() - flowStart;
-      info(`[FAST FLOW] *** OFC BOOKED in ${elapsed}ms *** Date=${date.Date.substring(0, 10)} Time=${entry.Time}`);
-      // Navigate to redirect URL if provided
-      if (result.redirectStub) {
-        const redirectUrl = `/en-US/${result.redirectStub}`;
-        info(`[FAST FLOW] Navigating to ${redirectUrl}`);
-        await page.goto(redirectUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null);
-      }
-      return {
-        success: true,
-        fallback: false,
-        redirectStub: result.redirectStub,
-        bookedDate: date.Date,
-        bookedTime: entry.Time
-      };
+      return confirmBooking(result, date, entry);
     }
 
     // Submit failed — move to next date (don't try more slots on this date)
-    warn(`[FAST FLOW] Submit failed for '${entry.Time}' on ${date.Date.substring(0, 10)}: ${result.error || 'unknown'}`);
+    warn(`[FAST FLOW] Submit failed for '${entry.Time}' on ${dateStr10}: ${result.error || 'unknown'}`);
+
+    // ── Same-date retry on 'slot_gone' ──────────────────────────────────
+    // Verified site behavior: after a failed submit the page itself fires
+    // a fresh getScheduleEntries (fresh slots + fresh token) plus its own
+    // auto-resubmit of the dead slot. Wait for that resubmit to drain,
+    // grab the fresh capture, and take ONE shot at a different remaining
+    // slot on this date before moving on.
+    if (result.code === 'slot_gone') {
+      const genBefore = entriesCaptureGen;
+      const drained = await waitForSubmitQuiesce(8000);
+      if (!drained) warn('[FAST FLOW] submits still in flight after 8s — retrying anyway');
+      const gotFresh = await waitForNextEntriesCapture(genBefore, 5000);
+      const snap = gotFresh ? getCapturedEntriesSnapshot() : null;
+      const retryCands = snap
+        ? sortScheduleEntries(
+            snap.entries.filter(e => e.Num !== entry.Num && e.EntriesAvailable >= memberCount),
+            config.appointment.preferredTime, config.preferLeastSlots)
+        : [];
+      if (retryCands.length > 0) {
+        const next = retryCands[0];
+        info(`[FAST FLOW] Post-failure refresh: ${retryCands.length} slot(s) remain on ${dateStr10} — retrying '${next.Time}' (Num=${next.Num}, avail=${next.EntriesAvailable})`);
+        client('🔁', `Slot taken — retrying ${dateStr10} at ${next.Time}...`);
+        // Brief settle so the refreshed time table finishes rendering.
+        await page.waitForTimeout(600);
+        const retryResult = await submitViaPageFunction(page, next, snap!.token, { responseTimeoutMs: 30000 });
+        if (retryResult.success) {
+          return confirmBooking(retryResult, date, next);
+        }
+        warn(`[FAST FLOW] Same-date retry failed for '${next.Time}' on ${dateStr10}: ${retryResult.error || 'unknown'}`);
+      } else {
+        info(`[FAST FLOW] Post-failure refresh: no seat-eligible slots remain on ${dateStr10}`);
+      }
+    }
 
     // If the error is a hard error (PSE0602, PSE0612, PSE0610), stop entirely
     const errStr = (result.error || '').toLowerCase();
@@ -1543,6 +1639,11 @@ export async function runDirectOfcFlow(page: Page, config: AutomationConfig): Pr
   // click path failed on render/radio problems — and it can retoken to retry
   // slots on dates the DOM path burned. Skipped on hard_error/success above.
   if (EXP_WIRE_SUBMIT) {
+    // The page may still have its own auto-resubmits in flight after the
+    // failed DOM submits — replaying wire calls against a session that is
+    // mid-submit poisons the token/session context. Wait for a quiet page.
+    const drained = await waitForSubmitQuiesce(8000);
+    if (!drained) warn('[WIRE FLOW] submits still in flight after 8s — replaying anyway');
     info('[WIRE FLOW] DOM fast-flow exhausted — trying wire replay as backup');
     const wireResult = await runWireBookingFlow(page, ctx, matchingDates, config).catch((e) => {
       warn('[WIRE FLOW] Unexpected error:', e instanceof Error ? e.message : String(e));
