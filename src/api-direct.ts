@@ -1,6 +1,7 @@
 import type { Page, Request, Response } from 'patchright';
 import { info, warn, client, backendError } from './logger';
 import type { AutomationConfig } from './config';
+import { recordDateExperiment } from './date-experiment'; // EXPERIMENTAL: avoidEarliestDate
 
 /**
  * Fast Flow module — books OFC appointments by leveraging the page's own
@@ -737,15 +738,38 @@ function workingDaysBetween(a: string, b: string): number {
  * the working-day window of the earliest, returns [2nd, 1st, 3rd, ...] —
  * the earliest remains the immediate fallback in the same attempt.
  * Otherwise returns the input unchanged.
+ *
+ * `meta` (optional): caller context written to logs/date-experiment.jsonl.
+ * A decision event is recorded whenever meta is provided — including when
+ * the flag is off (wouldReorder = baseline "would have fired" data).
  */
 export function orderDatesForAttempt<T>(
   items: T[],
   dateOf: (item: T) => string,
-  enabled: boolean
+  enabled: boolean,
+  meta?: Record<string, unknown>
 ): T[] {
-  if (!enabled || items.length < 2) return items;
-  const gap = workingDaysBetween(dateOf(items[0]), dateOf(items[1]));
-  if (gap === 0 || gap > AVOID_EARLIEST_WINDOW_DAYS) return items;
+  const gap = items.length >= 2
+    ? workingDaysBetween(dateOf(items[0]), dateOf(items[1]))
+    : 0;
+  const wouldReorder = gap > 0 && gap <= AVOID_EARLIEST_WINDOW_DAYS;
+  const reordered = enabled && wouldReorder;
+  if (meta) {
+    recordDateExperiment({
+      type: 'decision',
+      ...meta,
+      enabled,
+      nDates: items.length,
+      dates: items.slice(0, 6).map(dateOf),
+      gapWorkingDays: gap,
+      wouldReorder,
+      reordered,
+      order: reordered
+        ? [dateOf(items[1]), dateOf(items[0]), ...items.slice(2, 6).map(dateOf)]
+        : items.slice(0, 6).map(dateOf)
+    });
+  }
+  if (!reordered) return items;
   info(`[EXPERIMENTAL] avoidEarliestDate: 2nd date ${dateOf(items[1])} is ${gap} working day(s) after ${dateOf(items[0])} — trying it first (earliest remains fallback)`);
   return [items[1], items[0], ...items.slice(2)];
 }
@@ -1662,11 +1686,15 @@ export async function runDirectOfcFlow(page: Page, config: AutomationConfig): Pr
 
   // EXPERIMENTAL: avoidEarliestDate — reorder [2nd, 1st, ...] when the 2nd
   // date is within the working-day window. No-op when disabled/one date.
+  // datesReordered feeds outcome logging (promoted = tried-first 2nd date).
+  const filteredDates = filterScheduleDays(capturedScheduleDays, config);
   const matchingDates = orderDatesForAttempt(
-    filterScheduleDays(capturedScheduleDays, config),
+    filteredDates,
     d => d.Date.substring(0, 10),
-    config.avoidEarliestDate
+    config.avoidEarliestDate,
+    { path: 'fast', profile: config.username, postId: ctx.postId }
   );
+  const datesReordered = matchingDates !== filteredDates;
   if (matchingDates.length === 0) {
     info('[FAST FLOW] No dates matching configured range');
     return { success: false, fallback: false, reason: 'no_dates_in_range' };
@@ -1693,6 +1721,8 @@ export async function runDirectOfcFlow(page: Page, config: AutomationConfig): Pr
     const entriesResult = await clickDateAndGetEntries(page, date);
     if (!entriesResult || entriesResult.entries.length === 0) {
       info(`[FAST FLOW] No time slots for ${date.Date.substring(0, 10)}, moving to next date`);
+      // EXPERIMENTAL
+      recordDateExperiment({ type: 'outcome', path: 'fast', profile: config.username, postId: ctx.postId, date: date.Date.substring(0, 10), pos: di + 1, promoted: datesReordered && di === 0, result: entriesResult ? 'no_entries' : 'no_response' });
       continue;
     }
 
@@ -1705,6 +1735,8 @@ export async function runDirectOfcFlow(page: Page, config: AutomationConfig): Pr
     info(`[FAST FLOW] ${sortedEntries.length} time slot(s) for ${date.Date.substring(0, 10)} (${eligibleEntries.length} seat-eligible): ${sortedEntries.map(e => `${e.Time}(avail=${e.EntriesAvailable})`).join(', ')}`);
     if (eligibleEntries.length === 0) {
       info(`[FAST FLOW] All slots on ${date.Date.substring(0, 10)} below member count ${memberCount} — next date`);
+      // EXPERIMENTAL
+      recordDateExperiment({ type: 'outcome', path: 'fast', profile: config.username, postId: ctx.postId, date: date.Date.substring(0, 10), pos: di + 1, promoted: datesReordered && di === 0, result: 'no_eligible', entries: sortedEntries.length });
       continue;
     }
     {
@@ -1746,6 +1778,8 @@ export async function runDirectOfcFlow(page: Page, config: AutomationConfig): Pr
     // arrive fast and are handled by their error response, not timeouts.
     const responseTimeoutMs = di === 0 ? 60000 : 30000;
     const result = await submitViaPageFunction(page, entry, entriesResult.token, { responseTimeoutMs });
+    // EXPERIMENTAL
+    recordDateExperiment({ type: 'outcome', path: 'fast', profile: config.username, postId: ctx.postId, date: dateStr10, pos: di + 1, promoted: datesReordered && di === 0, result: result.success ? 'booked' : (result.code || 'error'), time: entry.Time, entries: sortedEntries.length, eligible: eligibleEntries.length });
 
     if (result.success) {
       return confirmBooking(result, date, entry);
@@ -1802,6 +1836,8 @@ export async function runDirectOfcFlow(page: Page, config: AutomationConfig): Pr
         // Brief settle so the refreshed time table finishes rendering.
         await page.waitForTimeout(600);
         const retryResult = await submitViaPageFunction(page, next, snap!.token, { responseTimeoutMs: 30000 });
+        // EXPERIMENTAL
+        recordDateExperiment({ type: 'outcome', path: 'fast', profile: config.username, postId: ctx.postId, date: dateStr10, pos: di + 1, promoted: datesReordered && di === 0, result: retryResult.success ? 'booked_retry' : (retryResult.code || 'retry_error'), time: next.Time });
         if (retryResult.success) {
           return confirmBooking(retryResult, date, next);
         }
@@ -1933,6 +1969,8 @@ export async function consumeLateEntriesRescue(
   const entry = eligibleEntries[0];
   client('⏳', `Submitting rescued slot ${dateStr10} at ${entry.Time}...`);
   const result = await submitViaPageFunction(page, entry, snapshot.token, { responseTimeoutMs: 30000 });
+  // EXPERIMENTAL
+  recordDateExperiment({ type: 'outcome', path: 'rescue', profile: config.username, date: dateStr10, result: result.success ? 'booked' : (result.code || 'error'), time: entry.Time });
   if (result.success) {
     info(`[RESCUE] *** OFC BOOKED via late-entries rescue *** Date=${dateStr10} Time=${entry.Time}`);
     if (result.redirectStub) {

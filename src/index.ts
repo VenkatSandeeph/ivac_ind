@@ -52,6 +52,7 @@ import {
   type StaticProxyRelay
 } from './static-proxy';
 import { setupApiResponseCapture, runDirectOfcFlow, resetCapturedScheduleData, getMemberQueryResult, resetMemberQueryResult, consumeLateEntriesRescue, orderDatesForAttempt, type DirectApiResult } from './api-direct';
+import { recordDateExperiment } from './date-experiment'; // EXPERIMENTAL: avoidEarliestDate
 import { playBeep } from './beep';
 import { recordSlotObservation } from './slot-tracker';
 
@@ -2468,6 +2469,7 @@ async function main() {
       // time slots by descending availability. If submit stays disabled for 5s on a time slot,
       // we try the next slot. If a date has no working time slot, we jump to the next date.
       let candidateDates: { date: string; locator: any }[];
+      let domDatesReordered = false; // EXPERIMENTAL: avoidEarliestDate
       {
         // Single DOM evaluation that returns BOTH all visible green dates and
         // the in-range subset — zero extra DOM round-trip vs. the old call.
@@ -2479,7 +2481,9 @@ async function main() {
         );
         // EXPERIMENTAL: avoidEarliestDate — same 2nd-first reorder as the
         // fast flow so DOM fallback doesn't silently switch strategy.
-        candidateDates = orderDatesForAttempt(inRange, c => c.date, config.avoidEarliestDate);
+        candidateDates = orderDatesForAttempt(inRange, c => c.date, config.avoidEarliestDate,
+          { path: 'dom', profile: config.username, city: currentCity, runId, attempt });
+        domDatesReordered = candidateDates !== inRange;
 
         // Log all available dates to client (even if not in range)
         const allDates = allAvailable.map(d => d.date);
@@ -2563,7 +2567,9 @@ async function main() {
                 []
               );
               // EXPERIMENTAL: avoidEarliestDate — same reorder as fast flow.
-              candidateDates = orderDatesForAttempt(inRange, c => c.date, config.avoidEarliestDate);
+              candidateDates = orderDatesForAttempt(inRange, c => c.date, config.avoidEarliestDate,
+                { path: 'dom', profile: config.username, city: tryCity, runId, attempt });
+              domDatesReordered = candidateDates !== inRange;
               // Log all available dates to client (even if not in range)
               const tryAllDates = allAvailable.map(d => d.date);
               const tryInRangeDates = inRange.map(d => d.date);
@@ -2665,6 +2671,8 @@ async function main() {
         const timeCandidates = await getAvailableTimeCandidates(page, config.appointment.preferredTime ?? null, config.preferLeastSlots);
         if (timeCandidates.length === 0) {
           warn(`No available time slots for date ${selectedDate}; moving to next date`);
+          // EXPERIMENTAL
+          recordDateExperiment({ type: 'outcome', path: 'dom', profile: config.username, city: currentCity, runId, attempt, date: selectedDate, pos: di + 1, promoted: domDatesReordered && di === 0, result: 'no_slots' });
           continue;
         }
 
@@ -2801,6 +2809,8 @@ async function main() {
           // don't wait 30 seconds for navigation — try the next time slot immediately.
           if (submitHasError && !submitAllScheduled) {
             warn(`OFC submit returned error (AllScheduled=false, HasError=true) — slot likely taken; trying next time slot`);
+            // EXPERIMENTAL
+            recordDateExperiment({ type: 'outcome', path: 'dom', profile: config.username, city: currentCity, runId, attempt, date: selectedDate, pos: di + 1, promoted: domDatesReordered && di === 0, result: 'submit_error', time: cand.time });
             continue;
           }
 
@@ -2826,6 +2836,8 @@ async function main() {
             break;
           }
 
+          // EXPERIMENTAL
+          recordDateExperiment({ type: 'outcome', path: 'dom', profile: config.username, city: currentCity, runId, attempt, date: selectedDate, pos: di + 1, promoted: domDatesReordered && di === 0, result: 'booked', time: cand.time });
           info('OFC submit positive and page navigated to consular schedule; starting consular stage');
           saveCheckpoint({
             runId,
