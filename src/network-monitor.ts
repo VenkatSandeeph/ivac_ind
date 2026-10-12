@@ -1,4 +1,4 @@
-import { Page, Request, Response } from 'playwright';
+import type { Page, Request, Response } from 'patchright';
 import { debug, warn } from './logger';
 
 const importantStatuses = new Set([403, 429, 500, 502, 503, 504]);

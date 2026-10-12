@@ -6,6 +6,24 @@ export type SecurityQuestionConfig = {
   answer: string;
 };
 
+export type NordVpnConfig = {
+  exePath: string;            // e.g. 'C:\\Program Files\\NordVPN\\nordvpn.exe'
+  connectTimeoutMs: number;   // default 30000
+  ipCheckUrl: string;         // default 'https://api.ipify.org'
+};
+
+// IP egress mode — replaces the old autoRotateIp checkbox:
+//   'none'   — never rotate (soft blocks cool down on the same IP)
+//   'auto'   — NordVPN CLI rotation (machine-wide, all profiles share one IP)
+//   'static' — per-profile proxy relay fed by proxies.txt, round-robin on the
+//              same rotation triggers as 'auto'
+export type IpMode = 'none' | 'auto' | 'static';
+
+export type StaticProxyConfig = {
+  file: string;            // proxies.txt path (default: <cwd>/proxies.txt)
+  portOffset: number;      // relay port = chromeRemoteDebugPort + this (default 10000)
+};
+
 export type AppointmentConfig = {
   city: string | string[];
   month: string | number;
@@ -14,6 +32,104 @@ export type AppointmentConfig = {
   endDate: string;
   preferredTime?: string | null;
 };
+
+export type AutomationConfig = {
+  authUrl: string;
+  scheduleUrl: string;
+  username: string;
+  password: string;
+  securityQuestions: SecurityQuestionConfig[];
+  appointment: AppointmentConfig;
+  chromeExecutable: string;
+  chromeUserDataDir: string;
+  chromeRemoteDebugPort: number;
+  maxSlotAttempts: number;
+  slotRetryDelayMs: number;
+  cityRetrySeconds: number;
+  cloudflareWaitMs: number;
+  debugNetwork: boolean;
+  autoSolveCloudflare: boolean;
+  headless: boolean;
+  alertOnMajorEvents: boolean;
+  screenshotAfterSelection: boolean;
+  dryRun: boolean;
+  uiApiMismatchRetries: number;
+  uiApiMismatchRetryDelayMs: number;
+  maxDateAttempts: number;
+  preferLeastSlots: boolean;
+  autoRotateIp: boolean;
+  ipMode: IpMode;
+  specialWindowOnly: boolean;
+  nordvpn: NordVpnConfig;
+  staticProxy: StaticProxyConfig;
+};
+
+export type ProfileConfig = {
+  id: string;
+  instanceIndex: number;
+  username: string;
+  password: string;
+  securityQuestions: SecurityQuestionConfig[];
+  appointment: AppointmentConfig;
+  authUrl?: string;
+  scheduleUrl?: string;
+  chromeExecutable?: string;
+  chromeUserDataDir?: string;
+  chromeRemoteDebugPort?: number;
+  // Optional per-profile overrides (rare, but supported)
+  maxSlotAttempts?: number;
+  slotRetryDelayMs?: number;
+  cityRetrySeconds?: number;
+  cloudflareWaitMs?: number;
+  debugNetwork?: boolean;
+  autoSolveCloudflare?: boolean;
+  headless?: boolean;
+  alertOnMajorEvents?: boolean;
+  screenshotAfterSelection?: boolean;
+  dryRun?: boolean;
+  uiApiMismatchRetries?: number;
+  uiApiMismatchRetryDelayMs?: number;
+  maxDateAttempts?: number;
+  preferLeastSlots?: boolean;
+  autoRotateIp?: boolean;
+  ipMode?: IpMode;
+  specialWindowOnly?: boolean;
+  nordvpn?: Partial<NordVpnConfig>;
+};
+
+export type SettingsConfig = {
+  authUrl: string;
+  scheduleUrl: string;
+  chromeExecutable: string;
+  chromeUserDataDir: string;
+  chromeRemoteDebugPort: number;
+  maxSlotAttempts: number;
+  slotRetryDelayMs: number;
+  cityRetrySeconds: number;
+  cloudflareWaitMs: number;
+  debugNetwork: boolean;
+  autoSolveCloudflare: boolean;
+  headless: boolean;
+  alertOnMajorEvents: boolean;
+  screenshotAfterSelection: boolean;
+  dryRun: boolean;
+  uiApiMismatchRetries: number;
+  uiApiMismatchRetryDelayMs: number;
+  maxDateAttempts: number;
+  preferLeastSlots: boolean;
+  autoRotateIp: boolean;
+  ipMode: IpMode;
+  specialWindowOnly: boolean;
+  nordvpn: NordVpnConfig;
+};
+
+export type MultiProfileConfig = {
+  schemaVersion: number;
+  settings: Partial<SettingsConfig>;
+  profiles: ProfileConfig[];
+};
+
+export type LegacyConfig = AutomationConfig;
 
 function parseCityList(value: unknown): string | string[] {
   if (Array.isArray(value)) {
@@ -36,27 +152,6 @@ function parseCityList(value: unknown): string | string[] {
 
   return '';
 }
-
-export type AutomationConfig = {
-  authUrl: string;
-  scheduleUrl: string;
-  username: string;
-  password: string;
-  securityQuestions: SecurityQuestionConfig[];
-  appointment: AppointmentConfig;
-  chromeExecutable: string;
-  chromeUserDataDir: string;
-  chromeRemoteDebugPort: number;
-  maxSlotAttempts: number;
-  slotRetryDelayMs: number;
-  cloudflareWaitMs: number;
-  debugNetwork: boolean;
-  useCamoufox: boolean;
-  autoSolveCloudflare: boolean;
-  headless: boolean;
-};
-
-const configFile = path.resolve(process.cwd(), 'config.local.json');
 
 function parseNumber(value: unknown, fallback: number) {
   if (typeof value === 'number') return value;
@@ -92,76 +187,264 @@ function parseBoolean(value: unknown, fallback: boolean) {
   return fallback;
 }
 
-function loadLocalConfig(): Partial<AutomationConfig> {
+// Accepts 'none'/'no ip'/'off', 'auto'/'auto ip', 'static'/'static ip'.
+// When ipMode is absent (legacy configs), derives it from autoRotateIp so
+// existing installs keep their behavior: false→'none', true→'auto'.
+function parseIpMode(value: unknown, autoRotateIp: boolean): IpMode {
+  const v = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (v === 'none' || v === 'no ip' || v === 'off' || v === 'false') return 'none';
+  if (v === 'static' || v === 'static ip' || v === 'staticip') return 'static';
+  if (v === 'auto' || v === 'auto ip' || v === 'autoip' || v === 'true') return 'auto';
+  return autoRotateIp ? 'auto' : 'none';
+}
+
+function looksLikePlaceholder(value: string) {
+  const normalized = value.trim().toLowerCase();
+  return (
+    normalized === '' ||
+    normalized.includes('your_username') ||
+    normalized.includes('your_password') ||
+    normalized.includes('<tenant>') ||
+    normalized.includes('...')
+  );
+}
+
+function isLikelyAuthFlowUrl(value: string) {
+  try {
+    const parsed = new URL(value);
+    const host = parsed.hostname.toLowerCase();
+    const path = parsed.pathname.toLowerCase();
+    return (
+      host.includes('usvisascheduling.com') ||
+      host.includes('b2clogin.com') ||
+      path.includes('/oauth2/') ||
+      path.includes('/authorize')
+    );
+  } catch {
+    return false;
+  }
+}
+
+const configFile = path.resolve(process.cwd(), 'config.local.json');
+
+function loadRawConfig(): unknown {
   if (!fs.existsSync(configFile)) {
-    return {};
+    return null;
   }
 
   try {
     const content = fs.readFileSync(configFile, 'utf8');
-    return JSON.parse(content) as Partial<AutomationConfig>;
+    return JSON.parse(content);
   } catch {
-    return {};
+    return null;
   }
 }
 
-export function loadConfig(): AutomationConfig {
-  const local = loadLocalConfig();
+function isMultiProfileConfig(obj: any): obj is MultiProfileConfig {
+  return obj && Array.isArray(obj.profiles);
+}
 
+export function getActiveProfileId(): string | null {
+  const envId = process.env.IVAC_PROFILE_ID;
+  if (envId && envId.trim()) return envId.trim();
+  return null;
+}
+
+function resolveProfile(raw: unknown, profileId: string | null): { settings: Partial<SettingsConfig>; profile: ProfileConfig | null } {
+  if (!raw || typeof raw !== 'object') {
+    throw new Error('config.local.json is missing or could not be parsed.');
+  }
+
+  const obj = raw as any;
+
+  if (isMultiProfileConfig(obj)) {
+    const settings = (obj.settings || {}) as Partial<SettingsConfig>;
+    const profiles = obj.profiles || [];
+
+    if (profiles.length === 0) {
+      throw new Error('No profiles defined in config.local.json.');
+    }
+
+    let profile: ProfileConfig | undefined;
+    if (profileId) {
+      profile = profiles.find((p) => p.id === profileId || p.username === profileId || String(p.instanceIndex) === profileId);
+    }
+
+    if (!profile) {
+      // Fall back to first profile; warn in log if an id was requested but not found
+      if (profileId) {
+        console.warn(`[config] Profile '${profileId}' not found, falling back to first profile.`);
+      }
+      profile = profiles[0];
+    }
+
+    return { settings, profile };
+  }
+
+  // Legacy flat config: the whole object is the single profile, with global settings
+  const legacy = obj as Partial<AutomationConfig>;
+  const profile: ProfileConfig = {
+    id: 'default',
+    instanceIndex: 1,
+    username: legacy.username || '',
+    password: legacy.password || '',
+    securityQuestions: Array.isArray(legacy.securityQuestions) ? legacy.securityQuestions : [],
+    appointment: legacy.appointment || {
+      city: '',
+      month: '',
+      year: 0,
+      startDate: '',
+      endDate: '',
+      preferredTime: null
+    },
+    chromeExecutable: legacy.chromeExecutable,
+    chromeUserDataDir: legacy.chromeUserDataDir,
+    chromeRemoteDebugPort: legacy.chromeRemoteDebugPort
+  };
+
+  const settings: Partial<SettingsConfig> = {
+    ...legacy,
+    username: undefined,
+    password: undefined,
+    securityQuestions: undefined,
+    appointment: undefined
+  } as Partial<SettingsConfig>;
+
+  return { settings, profile };
+}
+
+function mergeWithDefaults(settings: Partial<SettingsConfig>, profile: ProfileConfig): AutomationConfig {
   const env = process.env;
 
   const appointment: AppointmentConfig = {
-    city: parseCityList(local.appointment?.city ?? env.APPOINTMENT_CITY ?? 'Unknown City'),
-    month: parseMonth(local.appointment?.month ?? env.APPOINTMENT_MONTH),
-    year: parseNumber(local.appointment?.year ?? env.APPOINTMENT_YEAR, 0),
+    city: parseCityList(profile.appointment?.city ?? env.APPOINTMENT_CITY ?? 'Unknown City'),
+    month: parseMonth(profile.appointment?.month ?? env.APPOINTMENT_MONTH ?? ''),
+    year: parseNumber(profile.appointment?.year ?? env.APPOINTMENT_YEAR, 0),
     startDate:
-      local.appointment?.startDate || env.APPOINTMENT_START_DATE || '',
+      profile.appointment?.startDate || env.APPOINTMENT_START_DATE || '',
     endDate:
-      local.appointment?.endDate || env.APPOINTMENT_END_DATE || '',
+      profile.appointment?.endDate || env.APPOINTMENT_END_DATE || '',
     preferredTime:
-      local.appointment?.preferredTime ?? env.APPOINTMENT_PREFERRED_TIME ?? null
+      profile.appointment?.preferredTime ?? env.APPOINTMENT_PREFERRED_TIME ?? null
   };
 
-  const securityQuestions =
-    local.securityQuestions ||
-    (env.SECURITY_QUESTIONS ? JSON.parse(env.SECURITY_QUESTIONS) : []);
+  const securityQuestions = Array.isArray(profile.securityQuestions)
+    ? profile.securityQuestions
+    : [];
+
+  const legacyAutoRotate = parseBoolean(profile.autoRotateIp ?? settings.autoRotateIp ?? env.AUTO_ROTATE_IP, true);
+  const ipMode = parseIpMode(profile.ipMode ?? settings.ipMode ?? env.IP_MODE, legacyAutoRotate);
 
   const config: AutomationConfig = {
-    authUrl: local.authUrl || env.AUTH_URL || '',
+    authUrl: profile.authUrl ?? settings.authUrl ?? env.AUTH_URL ?? '',
     scheduleUrl:
-      local.scheduleUrl || env.SCHEDULE_URL || 'https://www.usvisascheduling.com/en-US/ofc-schedule/',
-    username: local.username || env.USERNAME || '',
-    password: local.password || env.PASSWORD || '',
+      profile.scheduleUrl ?? settings.scheduleUrl ?? env.SCHEDULE_URL ?? 'https://www.usvisascheduling.com/en-US/ofc-schedule/',
+    username: profile.username ?? env.USERNAME ?? '',
+    password: profile.password ?? env.PASSWORD ?? '',
     securityQuestions,
     appointment,
     chromeExecutable:
-      local.chromeExecutable || env.CHROME_EXECUTABLE || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+      profile.chromeExecutable ?? settings.chromeExecutable ?? env.CHROME_EXECUTABLE ?? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
     chromeUserDataDir:
-      local.chromeUserDataDir || env.CHROME_USER_DATA_DIR || 'C:\\temp\\chrome-debug',
+      profile.chromeUserDataDir ?? settings.chromeUserDataDir ?? env.CHROME_USER_DATA_DIR ?? path.resolve(process.cwd(), 'chrome-debug-1'),
     chromeRemoteDebugPort:
-      parseNumber(local.chromeRemoteDebugPort ?? env.CHROME_REMOTE_DEBUG_PORT, 9222),
+      parseNumber(profile.chromeRemoteDebugPort ?? settings.chromeRemoteDebugPort ?? env.CHROME_REMOTE_DEBUG_PORT, 9222),
     maxSlotAttempts:
-      parseNumber(local.maxSlotAttempts ?? env.MAX_SLOT_ATTEMPTS, 10),
+      parseNumber(profile.maxSlotAttempts ?? settings.maxSlotAttempts ?? env.MAX_SLOT_ATTEMPTS, 10),
     slotRetryDelayMs:
-      parseNumber(local.slotRetryDelayMs ?? env.SLOT_RETRY_DELAY_MS, 10000),
+      parseNumber(profile.slotRetryDelayMs ?? settings.slotRetryDelayMs ?? env.SLOT_RETRY_DELAY_MS, 10000),
+    cityRetrySeconds:
+      parseNumber(profile.cityRetrySeconds ?? settings.cityRetrySeconds ?? env.CITY_RETRY_SECONDS, 10),
     cloudflareWaitMs:
-      parseNumber(local.cloudflareWaitMs ?? env.CLOUDFLARE_WAIT_MS, 180000),
+      parseNumber(profile.cloudflareWaitMs ?? settings.cloudflareWaitMs ?? env.CLOUDFLARE_WAIT_MS, 180000),
     debugNetwork:
-      parseBoolean(local.debugNetwork ?? env.DEBUG_NETWORK, false),
-    useCamoufox:
-      parseBoolean(local.useCamoufox ?? env.USE_CAMOUFOX, false),
+      parseBoolean(profile.debugNetwork ?? settings.debugNetwork ?? env.DEBUG_NETWORK, false),
     autoSolveCloudflare:
-      parseBoolean(local.autoSolveCloudflare ?? env.AUTO_SOLVE_CLOUDFLARE, false),
+      parseBoolean(profile.autoSolveCloudflare ?? settings.autoSolveCloudflare ?? env.AUTO_SOLVE_CLOUDFLARE, false),
     headless:
-      parseBoolean(local.headless ?? env.HEADLESS, false)
+      parseBoolean(profile.headless ?? settings.headless ?? env.HEADLESS, false),
+    alertOnMajorEvents:
+      parseBoolean(profile.alertOnMajorEvents ?? settings.alertOnMajorEvents ?? env.ALERT_ON_MAJOR_EVENTS, true),
+    screenshotAfterSelection:
+      parseBoolean(profile.screenshotAfterSelection ?? settings.screenshotAfterSelection ?? env.SCREENSHOT_AFTER_SELECTION, true),
+    dryRun:
+      parseBoolean(profile.dryRun ?? settings.dryRun ?? env.DRY_RUN, true),
+    uiApiMismatchRetries:
+      parseNumber(profile.uiApiMismatchRetries ?? settings.uiApiMismatchRetries ?? env.UI_API_MISMATCH_RETRIES, 2),
+    uiApiMismatchRetryDelayMs:
+      parseNumber(profile.uiApiMismatchRetryDelayMs ?? settings.uiApiMismatchRetryDelayMs ?? env.UI_API_MISMATCH_RETRY_DELAY_MS, 1000),
+    maxDateAttempts:
+      parseNumber(profile.maxDateAttempts ?? settings.maxDateAttempts ?? env.MAX_DATE_ATTEMPTS, 3),
+    preferLeastSlots:
+      parseBoolean(profile.preferLeastSlots ?? settings.preferLeastSlots ?? env.PREFER_LEAST_SLOTS, false),
+    // autoRotateIp is kept for backward compatibility and now means "rotation
+    // is allowed" — derived from ipMode ('none' = never rotate).
+    autoRotateIp: ipMode !== 'none',
+    ipMode,
+    specialWindowOnly:
+      parseBoolean(profile.specialWindowOnly ?? settings.specialWindowOnly ?? env.SPECIAL_WINDOW_ONLY, false),
+    nordvpn: mergeNordVpnConfig(profile.nordvpn, settings.nordvpn, env),
+    staticProxy: {
+      file: env.STATIC_PROXY_FILE ?? path.resolve(process.cwd(), 'proxies.txt'),
+      portOffset: parseNumber(env.STATIC_PROXY_PORT_OFFSET, 10000)
+    }
   };
 
+  return config;
+}
+
+function mergeNordVpnConfig(
+  profileNordVpn: Partial<NordVpnConfig> | undefined,
+  settingsNordVpn: NordVpnConfig | undefined,
+  env: NodeJS.ProcessEnv
+): NordVpnConfig {
+  return {
+    exePath:
+      profileNordVpn?.exePath ??
+      settingsNordVpn?.exePath ??
+      env.NORDVPN_EXE_PATH ??
+      'C:\\Program Files\\NordVPN\\nordvpn.exe',
+    connectTimeoutMs:
+      parseNumber(
+        profileNordVpn?.connectTimeoutMs ?? settingsNordVpn?.connectTimeoutMs ?? env.NORDVPN_CONNECT_TIMEOUT_MS,
+        30000
+      ),
+    ipCheckUrl:
+      profileNordVpn?.ipCheckUrl ??
+      settingsNordVpn?.ipCheckUrl ??
+      'https://api.ipify.org'
+  };
+}
+
+export function loadConfig(): AutomationConfig {
+  const raw = loadRawConfig();
+  if (!raw) {
+    throw new Error('config.local.json not found. Create it from the launcher UI or manually before running the core.');
+  }
+
+  const profileId = getActiveProfileId();
+  const { settings, profile } = resolveProfile(raw, profileId);
+
+  if (!profile) {
+    throw new Error('No profile resolved from config.local.json.');
+  }
+
+  const config = mergeWithDefaults(settings, profile);
+
   if (!config.authUrl) {
-    throw new Error('Missing authUrl. Set AUTH_URL or config.local.json authUrl.');
+    throw new Error('Missing authUrl. Set AUTH_URL or config.local.json settings/profiles.authUrl.');
+  }
+
+  if (looksLikePlaceholder(config.authUrl) || !isLikelyAuthFlowUrl(config.authUrl)) {
+    throw new Error('authUrl must be a real usvisascheduling or B2C login URL, not an example placeholder.');
   }
 
   if (!config.username || !config.password) {
-    throw new Error('Missing credentials. Set USERNAME/PASSWORD or config.local.json.');
+    throw new Error('Missing credentials. Set USERNAME/PASSWORD or add a profile in config.local.json.');
+  }
+
+  if (looksLikePlaceholder(config.username) || looksLikePlaceholder(config.password)) {
+    throw new Error('username/password in config.local.json still use placeholder values. Replace them with real credentials.');
   }
 
   const appointmentCity = config.appointment.city;

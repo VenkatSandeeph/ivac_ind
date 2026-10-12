@@ -32,7 +32,12 @@
   "slotRetryDelayMs": 10000,
   "cloudflareWaitMs": 180000,
   "debugNetwork": false,
-  "useCamoufox": false,
   "autoSolveCloudflare": false,
-  "headless": false
+  "headless": false,
+  "alertOnMajorEvents": true,
+  "screenshotAfterSelection": true,
+  "cityRetrySeconds": 10,
+  "dryRun": true,
+  "preferLeastSlots": false,
+  "autoRotateIp": true
 }

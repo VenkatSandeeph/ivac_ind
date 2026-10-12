@@ -1,4 +1,4 @@
-import { Page, Locator } from 'playwright';
+import type { Page, Locator } from 'patchright';
 import { SecurityQuestionConfig } from './config';
 import { info, warn } from './logger';
 
@@ -7,11 +7,6 @@ function cleanText(text: string) {
     .replace(/\s+/g, ' ')
     .trim()
     .toLowerCase();
-}
-
-async function humanDelay(page: Page, baseMs = 750) {
-  const delay = baseMs + Math.floor(Math.random() * 250);
-  await page.waitForTimeout(delay);
 }
 
 function matchQuestionText(question: string, configured: string) {
@@ -135,9 +130,7 @@ export async function answerSecurityQuestions(page: Page, configuredQuestions: S
 
   for (const pair of questionPairs) {
     info('Answering security question:', pair.labelText);
-    await humanDelay(page);
     await pair.field.fill(pair.answer);
-    await humanDelay(page, 250);
   }
 
   const continueButton = page.locator('button#continue');
