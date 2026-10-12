@@ -342,11 +342,8 @@ export async function runConsularSchedule(page: Page, config: AutomationConfig):
           // successful consular submit. Capture that page as a PDF (CDP
           // printToPDF — same output as the page's Print button) and send it
           // to Telegram. Awaited because the process exits after booking; the
-          // helper is bounded and never throws. Skipped on dry runs — no
-          // submit was clicked so no confirmation page will load.
-          if (!config.dryRun) {
-            await sendConfirmationPdfToTelegram(page, config);
-          }
+          // helper is bounded and never throws.
+          await sendConfirmationPdfToTelegram(page, config);
           return true;
         }
         warn(`Consular stage: submit not enabled/clicked for time '${cand.time}' (${Date.now() - submitStart}ms); trying next time`);

@@ -50,7 +50,16 @@ Observed during a real slot drop (NEW DELHI, :56 window): submits returned HTTP 
 - **In-flight tracking** — `pendingOfcSubmits` counts `appointments-for-family` requests (increment on request, decrement on response or `requestfailed`) so retries/wire replay never race the page's own auto-resubmit.
 - **Wire replay gating + fresh token** — `runWireBookingFlow` now waits for submit quiesce (8s) and prefers `capturedEntriesToken` over the days-level `capturedScheduleToken`; the stale days token caused `PSE0601` on every wire call.
 
-**Lessons learned:** the page auto-refreshes entries after a failed submit (a stale-token assumption was wrong); submit failures are contention losses, not bugs — act on the error response, don't shorten the success timeout; wire replay must never run against a session with submits in flight.
+### Adaptive Entries Wait + Late-Entries Rescue
+
+Observed during a slot drop (NEW DELHI, :56 window): the days call took 21s under server load, the entries response took ~17s, but the fixed 8s Phase-2 wait gave up at second 8 — **5 bookable entries arrived 9s after the timeout and were orphaned** while the loop idled in the inter-city wait.
+
+- **Request-aware wait** — `entriesRequestGen` tracks getScheduleEntries *requests* (not just responses). `clickDateAndGetEntries` first waits ~3s for a request to fire: no request → dead click → bail immediately (faster than the old 8s). Request seen → the response is guaranteed, just slow → wait `min(30s, max(15s, 1.5 × lastDaysLatencyMs))` where `lastDaysLatencyMs` is the just-measured days-call round-trip. Waits resolve the instant the capture lands, so fast responses are never slowed — only the ceiling moved.
+- **Late-entries rescue** — when the adaptive wait expires with the request still in flight, `lateEntriesRescue` is armed (`{date, sinceGen}`). The `all_exhausted` inter-city wait then runs `consumeLateEntriesRescue` concurrently with the normal sleep: if the late response lands before the deadline, the rescue waits for submit quiesce, verifies the page is still on OFC context (or already on consular → count as booked), and submits one seat-eligible slot via `submitViaPageFunction` with the captured token — same sort/filter logic, no extra API calls. After the sleep, a bounded 25s settle race lets a mid-flight rescue submit finish.
+- **Hard boundary** — `postId` is per-city; the capture dies at the next `selectCity`. `resetCapturedScheduleData()` (called before every city selection) clears `lateEntriesRescue`, so nothing can ever be submitted against the next city's context. Rescue is single-shot per city.
+- **Special-window waits do NOT arm the rescue** — `preciseSleepUntilSpecialWindow` must fire selection exactly on the trigger; a rescue submit mid-window would risk missing it.
+
+**Lessons learned:** the page auto-refreshes entries after a failed submit (a stale-token assumption was wrong); submit failures are contention losses, not bugs — act on the error response, don't shorten the success timeout; wire replay must never run against a session with submits in flight; a captured-but-unconsumed response is a wasted slot — listen during dead time, and discard the capture the instant the city context dies. the page auto-refreshes entries after a failed submit (a stale-token assumption was wrong); submit failures are contention losses, not bugs — act on the error response, don't shorten the success timeout; wire replay must never run against a session with submits in flight.
 
 ### Special Windows (slot-drop timing)
 
@@ -70,16 +79,17 @@ The NordVPN module (`src/nordvpn.ts`) provides machine-wide IP rotation using th
 All ivac-core processes (all profiles share one IP)
   → NordVPN desktop app (must be running + logged in)
   → nordvpn -d  (disconnect)
-  → nordvpn -c -g "<city>"  (ordered city sequence — verified working form)
+  → nordvpn -c -g "<city>"  (random pick from nordvpn-cities.json — verified working form)
   → new residential IP
 ```
 
 - `rotateNordVpn(config)` runs `nordvpn -d` then `nordvpn -c -g "<city>"` via child_process (city names are valid `-g` groups on this build — verified; the documented positional `-c <country> <city>` form is silently ignored → quick-connects to fastest/India, do NOT use it).
-- Rotation walks an **ordered city sequence** (in-memory, wraps around): United States (55 cities) → United Kingdom (4) → France (4) → Denmark (1) → Czech Republic (1) → Papua New Guinea (1) → Costa Rica / San Jose (1). Each failed/no-new-IP attempt advances to the next city (max 5 per rotation), then falls back to a **country-group connect** (`nordvpn -c -g <country>`) for the last-attempted country — never bare Quick Connect (that lands on the fastest server, e.g. India, breaking the sequence).
+- Rotation picks cities **randomly** from `nordvpn-cities.json` (187 user-curated working entries, verified against api.nordvpn.com): ~70% weighted to the `hubs` pool (93 low-latency US/Canada/Europe exits) and ~30% to `rest` (94 worldwide exits). Each process consumes a **shuffle bag** — no repeats until the pool drains. A shared `.ivac-nordvpn-recent` file (last 10 attempted cities) keeps multiple profiles from re-picking the same exits. Each failed/no-new-IP attempt picks another random city (max 5 per rotation), then falls back to a **country-group connect** (`nordvpn -c -g <country>`) for the last-attempted country — never bare Quick Connect (that lands on the fastest server, e.g. India, ignoring the curated pool).
 - After connect, verifies the public IP changed (queries `api.ipify.org`) AND **geolocates it via ip-api.com** — the new IP's country must match the target (mismatch → rejected → next city). The CLI prints no stdout, so geo is the only proof the connect honored the target.
-- File lock (`.ivac-nordvpn.lock`) prevents concurrent rotations across multiple core processes.
+- File lock (`.ivac-nordvpn.lock`) prevents concurrent rotations across multiple core processes. The holder **heartbeats** the lock mtime every 10s — a real rotation takes 2-4 min, far past the 60s stale window, so a live lock is never mistaken for a dead one.
+- A process that finds the lock held **waits up to 45s** for the other rotation to finish; if `.ivac-nordvpn-current-ip` updates during the wait, it reuses the new shared IP and skips its own rotation.
 - 2-min cooldown (`.ivac-nordvpn-cooldown`) prevents cascading rotations from stale block signals.
-- Current IP written to `.ivac-nordvpn-current-ip` for UI display.
+- Current IP written to `.ivac-nordvpn-current-ip` for UI display. `ipRotatedSince(ts)` lets callers detect a rotation completed by another process — every strike-ladder rotation site checks it before rotating, so one profile's rotation resolves the block for all profiles instead of each rotating in turn.
 
 **Rotation triggers:**
 - **Hard blocks** — `isHardBlocked` classifies the page (`recoverFromBlockPage`):
@@ -102,10 +112,12 @@ All ivac-core processes (all profiles share one IP)
 - `disconnectNordVpn(exePath)` / `connectNordVpn(exePath, timeoutMs)` — individual commands
 - `getCurrentPublicIP(ipCheckUrl)` — fetch current public IP
 - `isCooldownActive()` / `isRotationLocked()` — lock/cooldown status checks
+- `ipRotatedSince(ts)` — true when another process completed a rotation after `ts` (mtime of `.ivac-nordvpn-current-ip`)
+- `pickCityTarget(recent)` — weighted shuffle-bag picker over `nordvpn-cities.json`
 
 **UI behavior:**
 - Single "Rotate IP" button in the header (topbar) — global, not per-profile.
-- `main.js` runs NordVPN commands directly for manual rotation (machine-wide, no core needed).
+- `main.js` delegates manual rotation to `ui/nordvpn-rotate.js` — a CommonJS port of `src/nordvpn.ts` that honors the same lock (waits up to 60s for an in-progress core rotation and reuses its result), the same city pool/recent files, and writes the shared cooldown so cores back off afterward.
 - `/api/rotate-ip` (POST) — runs disconnect + connect + IP check, returns new IP.
 - `/api/current-ip` (GET) — reads `.ivac-nordvpn-current-ip` file.
 - Current IP polled every 15s and displayed in the button subtext.
@@ -115,7 +127,7 @@ All ivac-core processes (all profiles share one IP)
 - **NordVPN app must be running and logged in** — the CLI talks to the desktop service.
 - **All profiles share one IP** — a block on one profile blocks all profiles.
 - **Rotation disrupts all profiles** — during disconnect→reconnect (10-30s), all Chrome instances lose network.
-- **City sequence is per-process.** `rotationIndex` is in-memory — each ivac-core process (and the UI's manual rotate) starts at US city 1. After the last city (Costa Rica / San Jose) it wraps to US city 1.
+- **City pool is shared, picks are per-process.** `nordvpn-cities.json` is read once per process; the shuffle bags are in-memory (each process sees a different random order). Cross-process dedup comes from `.ivac-nordvpn-recent`, not a shared pointer.
 - **Initial check on first profile start** — verifies NordVPN exe exists. Subsequent starts skip the check.
 
 ### IP Modes & Static Proxy Relay (Static IP)
@@ -311,7 +323,7 @@ The "Slot Pattern" button in the topbar (next to "Edit Profiles") opens a popup 
 - **NordVPN app must be running + logged in.** The CLI (`nordvpn.exe`) talks to the NordVPN desktop service. If not running/logged in, rotation fails gracefully (returns `rotated: false`).
 - **Disable NordVPN kill switch.** If kill switch is enabled, disconnect blocks ALL internet until reconnect completes, extending the disruption window significantly.
 - **Initial check on first profile start.** `main.js` verifies `nordvpn.exePath` exists before starting the first profile. Subsequent starts skip the check.
-- **No signal files between UI and core.** `main.js` runs NordVPN directly for manual rotation (machine-wide, no core needed). Cores run NordVPN directly for block-triggered rotation.
+- **UI and cores coordinate via the shared files, not signals.** `main.js` rotates via `ui/nordvpn-rotate.js` using the same lock/cooldown/recent files as `src/nordvpn.ts`; cores run NordVPN directly for block-triggered rotation.
 
 ## 9. Android App (mobile_session/)
 
@@ -319,7 +331,7 @@ A standalone Kotlin app (`com.ivac.mobile`) that ports the booking state machine
 
 **Key points for anyone modifying it:**
 
-- `Engine.kt` is a deliberate port of `src/index.ts` semantics — keep parity: API `ScheduleDays` is authoritative, 403/429 strikes → VPN rotate → pause+notify, `dryRun` never submits.
+- `Engine.kt` is a deliberate port of `src/index.ts` semantics — keep parity: API `ScheduleDays` is authoritative, 403/429 strikes → VPN rotate → pause+notify. (Desktop `dryRun` was removed — desktop always submits; mobile still supports it.)
 - `Driver` interface (`Engine.kt` top) is the only engine↔UI seam — `MainActivity` implements it.
 - VPN is **embedded WireGuard/NordLynx only** (`VpnManager` + `NordProvisioner` + `com.wireguard.android:tunnel`). The external OpenVPN-app path was deliberately removed — do not reintroduce.
 - `Store` encrypts profiles/settings with AES-256-GCM in AndroidKeyStore. Never log `wg_privkey`, `nord_token`, `tg_token`, or passwords.
@@ -333,5 +345,5 @@ A standalone Kotlin app (`com.ivac.mobile`) that ports the booking state machine
 3. Direct API verification (remove temp logs, verify all 3 tiers work).
 4. Consular direct API implementation.
 5. Multi-profile UI + config editor.
-6. ~~Proxy/concurrency features.~~ **NordVPN IP rotation implemented** — machine-wide VPN with file lock + 2-min cooldown, ordered city-sequence rotation, three-strike 403/429, staged hard-block recovery. Concurrency limits pending.
+6. ~~Proxy/concurrency features.~~ **NordVPN IP rotation implemented** — machine-wide VPN with heartbeat lock + 2-min cooldown, weighted-random picks from `nordvpn-cities.json` + shared recent-city dedup, `ipRotatedSince` cross-profile detection, three-strike 403/429, staged hard-block recovery. Concurrency limits pending.
 7. Auto-updater.

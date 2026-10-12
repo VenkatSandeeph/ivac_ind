@@ -265,47 +265,6 @@ pre {
   color: #2e5d96;
 }
 
-.retry-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin-top: 8px;
-}
-
-.retry-row label {
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.retry-row input {
-  width: 70px;
-  padding: 6px 8px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  font-size: 13px;
-  text-align: center;
-}
-
-.retry-row small {
-  color: var(--muted);
-  font-size: 11px;
-  flex-basis: 100%;
-}
-
-.retry-status {
-  font-size: 12px;
-  transition: opacity 0.3s;
-}
-
-.retry-status.ok {
-  color: var(--accent);
-}
-
-.retry-status.err {
-  color: var(--warn);
-}
-
 /* Browser-closed banner */
 .browser-closed-banner {
   display: flex;

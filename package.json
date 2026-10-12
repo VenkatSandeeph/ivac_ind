@@ -48,12 +48,18 @@
       "ui/main.js",
       "ui/renderer.js",
       "ui/index.html",
-      "ui/styles.css"
+      "ui/styles.css",
+      "ui/chrome-focus.js",
+      "ui/nordvpn-rotate.js"
     ],
     "extraFiles": [
       {
         "from": "dist/ivac-core.exe",
         "to": "ivac-core.exe"
+      },
+      {
+        "from": "nordvpn-cities.json",
+        "to": "nordvpn-cities.json"
       },
       {
         "from": "node_modules/patchright",

@@ -19,8 +19,6 @@
   ],
   "appointment": {
     "city": "Example City",
-    "month": "Aug",
-    "year": 2026,
     "startDate": "2026-08-10",
     "endDate": "2026-09-30",
     "preferredTime": null
@@ -37,7 +35,6 @@
   "alertOnMajorEvents": true,
   "screenshotAfterSelection": true,
   "cityRetrySeconds": 10,
-  "dryRun": true,
   "preferLeastSlots": false,
   "autoRotateIp": true
 }

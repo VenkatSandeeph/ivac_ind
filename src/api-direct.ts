@@ -109,6 +109,22 @@ let entriesCaptureGen = 0;
 // In-flight schedule-ofc-appointments-for-family POSTs (ours + the page's
 // own auto-resubmits after a failed submit).
 let pendingOfcSubmits = 0;
+// Request-side generation for getScheduleEntries — separates "response is
+// still in flight" (wait longer) from "the click never fired the call"
+// (bail early). Bumped in the request listener below.
+let entriesRequestGen = 0;
+let entriesRequestResolve: (() => void) | null = null;
+// Round-trip latency of the last getScheduleDays call — a live measure of
+// server load used to scale the entries wait budget.
+let daysRequestAt = 0;
+let lastDaysLatencyMs = 0;
+// Late-entries rescue: armed when Phase 2 times out with the entries request
+// still in flight. Consumed during the inter-city wait — never after the
+// next city selection (the context is per-city and dies there).
+let lateEntriesRescue: { date: ScheduleDay; sinceGen: number } | null = null;
+// Member count from the last flow context — the rescue needs it for the
+// seat-eligibility filter without re-extracting page state.
+let flowMemberCount = 1;
 
 let sessionApiCallCount = 0;
 let sessionStartTime = Date.now();
@@ -182,6 +198,19 @@ export function setupApiResponseCapture(page: Page): void {
       const routeMatch = url.match(/route=([^&]+)/);
       const shortRoute = routeMatch ? decodeURIComponent(routeMatch[1]).replace('/api/v1/schedule-group/', '') : 'unknown';
       const postData = (request.postData() || '').substring(0, 500);
+
+      // Request-side signals: days requests timestamp the latency measure;
+      // entries requests prove the click actually fired a call.
+      if (url.includes('get-family-ofc-schedule-days')) {
+        daysRequestAt = Date.now();
+      }
+      if (url.includes('get-family-ofc-schedule-entries')) {
+        entriesRequestGen++;
+        if (entriesRequestResolve) {
+          entriesRequestResolve();
+          entriesRequestResolve = null;
+        }
+      }
 
       // Log getScheduleEntries request (first one only — shows Token chain)
       if (url.includes('get-family-ofc-schedule-entries') && !pageEntriesHeadersLogged) {
@@ -294,6 +323,10 @@ export function setupApiResponseCapture(page: Page): void {
 
       // Capture schedule days + token from getScheduleDays
       if (url.includes('get-family-ofc-schedule-days')) {
+        if (daysRequestAt) {
+          lastDaysLatencyMs = Date.now() - daysRequestAt;
+          daysRequestAt = 0;
+        }
         let data = await response.json().catch(() => null);
         if (!data) {
           const body = await response.text().catch(() => '');
@@ -379,6 +412,9 @@ export function resetCapturedScheduleData(): void {
   capturedScheduleToken = null;
   capturedScheduleEntries = null;
   capturedEntriesToken = null;
+  // A pending late-entries rescue dies with the city context — the next
+  // selectCity switches postId/token chain, making the capture unusable.
+  lateEntriesRescue = null;
 }
 
 // =============================================================================
@@ -431,6 +467,37 @@ function waitForNextEntriesCapture(sinceGen: number, timeoutMs: number): Promise
       resolve(true);
     };
   });
+}
+
+/**
+ * Wait until a getScheduleEntries REQUEST has been observed leaving the page
+ * (not the response — the request itself). If the click never triggers the
+ * PCF handler, no request fires and we bail early instead of waiting on a
+ * response that can never arrive.
+ */
+function waitForEntriesRequest(sinceGen: number, timeoutMs: number): Promise<boolean> {
+  if (entriesRequestGen > sinceGen) return Promise.resolve(true);
+  return new Promise(resolve => {
+    const timer = setTimeout(() => {
+      entriesRequestResolve = null;
+      resolve(false);
+    }, timeoutMs);
+    entriesRequestResolve = () => {
+      clearTimeout(timer);
+      resolve(true);
+    };
+  });
+}
+
+/**
+ * Entries wait budget scaled to the server's demonstrated latency. The days
+ * call just measured current load — under drop pressure both calls run slow
+ * (observed: 21s days call followed by a 17s entries response that outlived
+ * the old fixed 8s wait and lost a real slot). Floor 15s, cap 30s.
+ */
+function entriesWaitBudgetMs(): number {
+  const scaled = Math.round(lastDaysLatencyMs * 1.5);
+  return Math.min(30000, Math.max(15000, scaled || 15000));
 }
 
 /**
@@ -732,6 +799,7 @@ async function clickDateAndGetEntries(
 
   // Use Playwright's real click — triggers the PCF framework's event handlers
   // which generate the Token and make the getScheduleEntries API call.
+  const reqGenBefore = entriesRequestGen;
   let clickOk = false;
   try {
     await page.click(cellSelector, { timeout: 3000 });
@@ -823,40 +891,57 @@ async function clickDateAndGetEntries(
         return resp.url().includes('get-family-ofc-schedule-entries');
       } catch { return false; }
     },
-    { timeout: 8000 }
+    { timeout: 30000 }
   ).catch(() => null);
 
-  let captured = await waitForCapturedEntries(8000);
+  // First prove the request actually fired — a dead click produces no
+  // request and must not pay the full wait for a response that can't exist.
+  const requestSeen = await waitForEntriesRequest(reqGenBefore, 3000);
 
-  // Busy-page extension: right after a failed submit the site is usually
-  // mid auto-resubmit — clicks land on a busy page and the entries call
-  // takes longer than 8s. Don't write the date off while submits fly.
-  if (!captured && pendingOfcSubmits > 0) {
-    info('[FAST FLOW] Phase 2: entries wait expired with submits in flight — page busy, extending wait');
-    await waitForSubmitQuiesce(6000);
-    captured = await waitForCapturedEntries(4000);
+  let captured = false;
+  if (requestSeen) {
+    // The call is in flight — the response is guaranteed, just possibly
+    // slow. Scale the wait to the days call's measured latency instead of
+    // the old fixed 8s (which lost real slots to a 17s loaded response).
+    const waitMs = entriesWaitBudgetMs();
+    info(`[FAST FLOW] Phase 2: entries request in flight — waiting up to ${(waitMs / 1000).toFixed(0)}s (days latency ${lastDaysLatencyMs}ms)`);
+    captured = await waitForCapturedEntries(waitMs);
+
+    // Busy-page extension: right after a failed submit the site is usually
+    // mid auto-resubmit — clicks land on a busy page and the entries call
+    // takes longer than 8s. Don't write the date off while submits fly.
+    if (!captured && pendingOfcSubmits > 0) {
+      info('[FAST FLOW] Phase 2: entries wait expired with submits in flight — page busy, extending wait');
+      await waitForSubmitQuiesce(6000);
+      captured = await waitForCapturedEntries(4000);
+    }
+  } else {
+    warn('[FAST FLOW] Phase 2: no getScheduleEntries request observed after click — call never fired');
   }
 
   if (!captured) {
-    // Try the response promise as backup
-    const resp = await responsePromise;
-    if (resp) {
-      info('[FAST FLOW] Phase 2: captured entries via backup response listener');
-      try {
-        const body = await resp.text();
-        const parsed = extractJsonFromHtml(body);
-        if (parsed && parsed.ScheduleEntries) {
-          const entries: ScheduleEntry[] = (parsed.ScheduleEntries || []).map((e: any) => ({
-            Num: String(e.Num),
-            Time: String(e.Time),
-            EntriesAvailable: Number(e.EntriesAvailable || 0)
-          }));
-          const token = String(parsed.Token || '');
-          const elapsed = Date.now() - phaseStart;
-          info(`[FAST FLOW] Phase 2: got ${entries.length} entries via backup (${elapsed}ms)`);
-          return { entries, token };
-        }
-      } catch { /* ignore */ }
+    // Backup listener — only meaningful when a request was actually seen
+    // (without one, a response cannot arrive; don't pay its timeout).
+    if (requestSeen) {
+      const resp = await responsePromise;
+      if (resp) {
+        info('[FAST FLOW] Phase 2: captured entries via backup response listener');
+        try {
+          const body = await resp.text();
+          const parsed = extractJsonFromHtml(body);
+          if (parsed && parsed.ScheduleEntries) {
+            const entries: ScheduleEntry[] = (parsed.ScheduleEntries || []).map((e: any) => ({
+              Num: String(e.Num),
+              Time: String(e.Time),
+              EntriesAvailable: Number(e.EntriesAvailable || 0)
+            }));
+            const token = String(parsed.Token || '');
+            const elapsed = Date.now() - phaseStart;
+            info(`[FAST FLOW] Phase 2: got ${entries.length} entries via backup (${elapsed}ms)`);
+            return { entries, token };
+          }
+        } catch { /* ignore */ }
+      }
     }
     // Distinguish between "no response" (click failed) and "response with 0 entries" (no slots)
     const finalSnapshot = getCapturedEntriesSnapshot();
@@ -864,7 +949,16 @@ async function clickDateAndGetEntries(
       info(`[FAST FLOW] Phase 2: page returned 0 entries for ${dateStr} (${Date.now() - phaseStart}ms) — no slots on this date`);
       return { entries: [], token: finalSnapshot.token };
     }
-    warn(`[FAST FLOW] Phase 2: timed out waiting for entries (${Date.now() - phaseStart}ms) — click may not have triggered the API call`);
+    warn(`[FAST FLOW] Phase 2: timed out waiting for entries (${Date.now() - phaseStart}ms)`);
+    if (requestSeen) {
+      // The request left but the response hasn't landed — it may still be
+      // coming (a loaded server answers late: observed 17s under drop
+      // pressure). Arm the late-capture rescue: the inter-city wait listens
+      // for it and submits while this city's context is still alive.
+      // Boundary: cleared by resetCapturedScheduleData at next city select.
+      lateEntriesRescue = { date: day, sinceGen: entriesCaptureGen };
+      info('[FAST FLOW] Phase 2: response still in flight — armed late-entries rescue for the inter-city wait');
+    }
     return null;
   }
 
@@ -1417,11 +1511,6 @@ async function runWireBookingFlow(
     let submits = 0;
     for (const entry of eligible) {
       if (submits >= EXP_WIRE_MAX_SUBMITS_PER_DATE) break;
-      if (config.dryRun) {
-        info(`[WIRE FLOW] DRY RUN — would submit ${entry.Time} (Num=${entry.Num}) on ${dateStr}`);
-        return { success: true, fallback: false, bookedDate: date.Date, bookedTime: entry.Time };
-      }
-
       submits += 1;
       info(`[WIRE FLOW] Submit ${submits}/${Math.min(eligible.length, EXP_WIRE_MAX_SUBMITS_PER_DATE)}: ${dateStr} @ ${entry.Time} (Num=${entry.Num}, avail=${entry.EntriesAvailable})`);
       client('⏳', `Submitting OFC appointment for ${dateStr} at ${entry.Time}...`);
@@ -1509,6 +1598,7 @@ export async function runDirectOfcFlow(page: Page, config: AutomationConfig): Pr
   if (!ctx) {
     return { success: false, fallback: true, reason: 'no_context' };
   }
+  flowMemberCount = Math.max(1, ctx.applications.length);
 
   // Get captured schedule days from the page's own getScheduleDays response
   if (!capturedScheduleDays || capturedScheduleDays.length === 0) {
@@ -1578,11 +1668,6 @@ export async function runDirectOfcFlow(page: Page, config: AutomationConfig): Pr
     const dateStr10 = date.Date.substring(0, 10);
     info(`[FAST FLOW] Submitting best slot for ${dateStr10}: '${entry.Time}' (Num=${entry.Num}, avail=${entry.EntriesAvailable})`);
     client('⏳', `Submitting OFC appointment for ${dateStr10} at ${entry.Time}...`);
-
-    if (config.dryRun) {
-      info(`[FAST FLOW] DRY RUN — skipping submit for '${entry.Time}'`);
-      return { success: true, fallback: false, bookedDate: date.Date, bookedTime: entry.Time };
-    }
 
     const confirmBooking = async (r: { redirectStub?: string }, d: ScheduleDay, e: ScheduleEntry): Promise<DirectApiResult> => {
       const elapsed = Date.now() - flowStart;
@@ -1719,4 +1804,82 @@ export async function runDirectOfcFlow(page: Page, config: AutomationConfig): Pr
   const elapsed = Date.now() - flowStart;
   info(`[FAST FLOW] All ${matchingDates.length} date(s) exhausted (${elapsed}ms) — caller should re-select city for fresh state`);
   return { success: false, fallback: false, reason: 'all_exhausted' };
+}
+
+// =============================================================================
+// Late-entries rescue — context-bound grace (backup path)
+// =============================================================================
+
+/**
+ * Consume a pending late-entries rescue during the inter-city wait.
+ *
+ * Backup path only — the main flow is never delayed by this: it listens
+ * inside the wait the loop already takes before the next city selection.
+ * If the in-flight getScheduleEntries response lands before the deadline,
+ * submit one seat-eligible slot with the captured token while the page is
+ * still in this city's context (rendered radios + token both valid).
+ *
+ * Consumed either way; also cleared by resetCapturedScheduleData at the
+ * next city selection (per-city postId/token chain dies there).
+ *
+ * Returns a DirectApiResult on a booked submit, or null when nothing
+ * arrived / nothing eligible / submit failed — caller proceeds normally.
+ */
+export async function consumeLateEntriesRescue(
+  page: Page,
+  config: AutomationConfig,
+  timeoutMs: number
+): Promise<DirectApiResult | null> {
+  const pending = lateEntriesRescue;
+  lateEntriesRescue = null;   // single-shot — consumed even if nothing arrives
+  if (!pending) return null;
+
+  const arrived = await waitForNextEntriesCapture(pending.sinceGen, timeoutMs);
+  if (!arrived) return null;
+
+  const dateStr10 = pending.date.Date.substring(0, 10);
+
+  // If the page navigated to consular while we waited, the booking already
+  // landed (the page's own flow) — count it, don't submit again.
+  const url = page.url();
+  if (url.includes('/schedule') && !url.includes('/ofc-schedule')) {
+    info(`[RESCUE] Page already on consular stage (${url}) — counting as booked`);
+    return { success: true, fallback: false, bookedDate: pending.date.Date };
+  }
+  if (!url.includes('/ofc-schedule')) {
+    warn(`[RESCUE] Page left the OFC context (${url}) — discarding late capture`);
+    return null;
+  }
+
+  const snapshot = getCapturedEntriesSnapshot();
+  if (!snapshot || snapshot.entries.length === 0) {
+    info('[RESCUE] Late entries response arrived with 0 entries — nothing to submit');
+    return null;
+  }
+  info(`[RESCUE] Late entries response arrived: ${snapshot.entries.length} slot(s) for ${dateStr10} — submitting before next city selection`);
+  client('🎯', `Late response arrived — ${snapshot.entries.length} slot(s) on ${dateStr10}, submitting...`);
+
+  // Never race the page's own in-flight submits.
+  const drained = await waitForSubmitQuiesce(6000);
+  if (!drained) warn('[RESCUE] submits still in flight after 6s — submitting anyway');
+
+  const sortedEntries = sortScheduleEntries(snapshot.entries, config.appointment.preferredTime, config.preferLeastSlots);
+  const eligibleEntries = sortedEntries.filter(e => e.EntriesAvailable >= flowMemberCount);
+  if (eligibleEntries.length === 0) {
+    info(`[RESCUE] No seat-eligible slot in the late capture (memberCount=${flowMemberCount})`);
+    return null;
+  }
+
+  const entry = eligibleEntries[0];
+  client('⏳', `Submitting rescued slot ${dateStr10} at ${entry.Time}...`);
+  const result = await submitViaPageFunction(page, entry, snapshot.token, { responseTimeoutMs: 30000 });
+  if (result.success) {
+    info(`[RESCUE] *** OFC BOOKED via late-entries rescue *** Date=${dateStr10} Time=${entry.Time}`);
+    if (result.redirectStub) {
+      await page.goto(`/en-US/${result.redirectStub}`, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null);
+    }
+    return { success: true, fallback: false, redirectStub: result.redirectStub, bookedDate: pending.date.Date, bookedTime: entry.Time };
+  }
+  warn(`[RESCUE] Rescued submit failed for '${entry.Time}' on ${dateStr10}: ${result.error || 'unknown'}`);
+  return null;
 }

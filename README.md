@@ -95,9 +95,7 @@ All settings live in `config.local.json` (or equivalent environment variables). 
 | `username` | `USERNAME` | Login username |
 | `password` | `PASSWORD` | Login password |
 | `appointment.city` | `APPOINTMENT_CITY` | Target city name (string or array of cities for rotation) |
-| `appointment.month` | `APPOINTMENT_MONTH` | Target month (`"Sep"` or `9`) |
-| `appointment.year` | `APPOINTMENT_YEAR` | Target year (`2026`) |
-| `appointment.startDate` | `APPOINTMENT_START_DATE` | Earliest acceptable date (`"2026-08-10"`) |
+| `appointment.startDate` | `APPOINTMENT_START_DATE` | Earliest acceptable date (`"2026-08-10"`). `month`/`year` are derived from this when not set explicitly |
 | `appointment.endDate` | `APPOINTMENT_END_DATE` | Latest acceptable date (`"2026-12-31"`) |
 | `securityQuestions` | `SECURITY_QUESTIONS` | Array of `{ question, answer }` pairs |
 
@@ -110,21 +108,18 @@ All settings live in `config.local.json` (or equivalent environment variables). 
 | `chromeExecutable` | `CHROME_EXECUTABLE` | `C:\Program Files\Google\Chrome\Application\chrome.exe` | Chrome binary path |
 | `chromeUserDataDir` | `CHROME_USER_DATA_DIR` | `C:\temp\chrome-debug` | Chrome user data directory |
 | `chromeRemoteDebugPort` | `CHROME_REMOTE_DEBUG_PORT` | `9222` | Chrome CDP port |
-| `cityRetrySeconds` | `CITY_RETRY_SECONDS` | `10` | Base delay (seconds) between city retry attempts |
+| `cityRetrySeconds` | `CITY_RETRY_SECONDS` | `30` | Base delay (seconds) between city retry attempts — per-profile value in Edit Profile wins over the global setting |
 | `maxSlotAttempts` | `MAX_SLOT_ATTEMPTS` | `10` | Max slot selection attempts |
 | `slotRetryDelayMs` | `SLOT_RETRY_DELAY_MS` | `10000` | Delay between slot retries (ms) |
 | `cloudflareWaitMs` | `CLOUDFLARE_WAIT_MS` | `180000` | Manual Cloudflare solve timeout (ms) |
 | `maxDateAttempts` | `MAX_DATE_ATTEMPTS` | `3` | Date/time selection retries per city |
 | `uiApiMismatchRetries` | `UI_API_MISMATCH_RETRIES` | `2` | Retries when API says no slots but UI might differ |
 | `uiApiMismatchRetryDelayMs` | `UI_API_MISMATCH_RETRY_DELAY_MS` | `1000` | Delay between mismatch retries (ms) |
-| `dryRun` | `DRY_RUN` | `true` | When `true`, skips the final submit click (safe testing mode) |
 | `autoSolveCloudflare` | `AUTO_SOLVE_CLOUDFLARE` | `false` | Auto-solve Cloudflare Turnstile with human-like Bezier curve clicks |
 | `debugNetwork` | `DEBUG_NETWORK` | `false` | Log all XHR/fetch requests |
 | `headless` | `HEADLESS` | `false` | Run Chrome in headless mode |
 | `alertOnMajorEvents` | `ALERT_ON_MAJOR_EVENTS` | `true` | Send login/submit events to Supabase |
 | `screenshotAfterSelection` | `SCREENSHOT_AFTER_SELECTION` | `true` | Screenshot after date/time selection |
-
-> **Important:** `dryRun` defaults to `true`. Set it to `false` in your config to enable actual appointment submission.
 
 ### License Management
 
@@ -172,8 +167,7 @@ The config loader (`config.ts`) performs strict validation at startup:
 - `username` and `password` must not be empty or placeholder values
 - `appointment.city` must be non-empty (string or non-empty array)
 - `appointment.startDate` must be earlier than or equal to `appointment.endDate`
-- `appointment.month` must be a valid month number (1-12) or short name (Jan-Dec)
-- `appointment.year` must be a valid four-digit year (>=2000)
+- `appointment.month`/`appointment.year` (optional — derived from `startDate` when absent) must be a valid month (1-12 or Jan-Dec) and four-digit year (>=2000)
 
 If validation fails, the script throws a descriptive error and exits immediately.
 
@@ -197,7 +191,7 @@ If validation fails, the script throws a descriptive error and exits immediately
 10. **Select month/year** -- Sets the `.ui-datepicker-month` and `.ui-datepicker-year` select elements to the configured values.
 11. **Choose date** -- Reads available dates from the calendar UI (`td[data-month][data-year]`), filters by the configured date range, and clicks the earliest (or preferred) date. Falls back to cross-month scanning if the configured month has no availability.
 12. **Select time slot** -- Reads time rows from `#time_select tbody tr`. Prefers the configured `preferredTime` if available. Otherwise selects the slot with the highest `data-slots` availability.
-13. **Submit appointment** -- Waits for the submit button (`#submitbtn`) to become enabled. Respects `dryRun` mode. Logs the selected time and sends a Supabase event before clicking.
+13. **Submit appointment** -- Waits for the submit button (`#submitbtn`) to become enabled. Logs the selected time and sends a Supabase event before clicking.
 14. **Run continuously** -- The main loop never exits. Recovers from errors, Cloudflare challenges, session expiry, HTTP 403/429, and page crashes automatically.
 
 ---
@@ -429,7 +423,6 @@ The UI is an Electron application with a hybrid architecture:
 - **Start / Stop** -- Start spawns the automation script (`tsx src/index.ts` in dev, `ivac-core.exe` in production). Stop writes a `.ivac-stop` signal file for graceful exit with a 5-second `taskkill` fallback.
 - **Connect Chrome** -- Probes the configured CDP port. If Chrome is not running, launches it with `--remote-debugging-port` and `--no-first-run`.
 - **Reload Config** -- Re-reads `config.local.json` and updates the display
-- **Update Retry Time** -- Writes a new `cityRetrySeconds` value to `config.local.json`
 - **Live log stream** -- Polls `/api/logs` every 2 seconds and auto-scrolls
 - **Clear Logs** -- Clears the in-memory log buffer
 - **Browser-closed banner** -- Orange warning banner with pulsing buttons when the browser is detected as closed
@@ -445,7 +438,6 @@ The UI is an Electron application with a hybrid architecture:
 | `/api/connect-chrome` | POST | Probes CDP port, launches Chrome if needed |
 | `/api/logs` | GET | Returns the full log buffer |
 | `/api/logs` | DELETE | Clears the log buffer |
-| `/api/retry-time` | POST | Saves `{ value }` as `cityRetrySeconds` to config |
 
 ### Single-instance Lock
 

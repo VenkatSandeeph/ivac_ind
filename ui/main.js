@@ -6,6 +6,8 @@ const path = require('path');
 const { spawn, exec } = require('child_process');
 const net = require('net');
 const os = require('os');
+const { focusChromeWindow } = require('./chrome-focus');
+const nordRotate = require('./nordvpn-rotate');
 
 // ---- paths (work in both dev and packaged mode) ----
 const IS_PACKAGED = app.isPackaged;
@@ -40,106 +42,13 @@ const STATIC_ROTATE_FLAG_FILE = path.join(PROJECT_ROOT, '.ivac-rotate-static');
 const STATIC_LAST_IP_FILE = path.join(PROJECT_ROOT, '.ivac-static-last-ip');
 const MAX_LOG_SIZE = 500_000;
 
-// Ordered country → city rotation sequence for the manual Rotate IP button
-// (mirrors src/nordvpn.ts). Exhausts every city of a country before moving to
-// the next country, then wraps to the first US city. In-memory only.
-const ROTATION_COUNTRIES = [
-  {
-    country: 'United States',
-    cities: [
-      'Montgomery', 'Anchorage', 'Phoenix', 'Little Rock', 'Los Angeles',
-      'San Francisco', 'Denver', 'New Haven', 'Wilmington', 'Miami',
-      'Atlanta', 'Honolulu', 'Boise', 'Chicago', 'Indianapolis',
-      'Des Moines', 'Wichita', 'Louisville', 'New Orleans', 'Lewiston',
-      'Baltimore', 'Boston', 'Detroit', 'Minneapolis', 'Jackson',
-      'Kansas City', 'Saint Louis', 'Billings', 'Omaha', 'Las Vegas',
-      'Nashua', 'Trenton', 'Albuquerque', 'Buffalo', 'New York',
-      'Charlotte', 'Fargo', 'Columbus', 'Oklahoma City', 'Portland',
-      'Pittsburgh', 'Providence', 'Charleston', 'Sioux Falls', 'Nashville',
-      'Dallas', 'Houston', 'McAllen', 'Salt Lake City', 'Burlington',
-      'Ashburn', 'Seattle', 'Huntington', 'Milwaukee', 'Cheyenne'
-    ]
-  },
-  { country: 'United Kingdom', cities: ['Edinburgh', 'Glasgow', 'London', 'Manchester'] },
-  { country: 'France', cities: ['Bordeaux', 'Marseille', 'Paris', 'Strasbourg'] },
-  { country: 'Denmark', cities: ['Copenhagen'] },
-  { country: 'Czech Republic', cities: ['Prague'] },
-  { country: 'Papua New Guinea', cities: ['Port Moresby'] },
-  { country: 'Costa Rica', cities: ['San Jose'] }
-];
-
-const CITY_ROTATION_SEQUENCE = ROTATION_COUNTRIES.flatMap(({ country, cities }) =>
-  cities.map((city) => ({ country, city }))
-);
-
-let rotationIndex = 0;
-
-function runNordVpnCommand(exePath, args, timeoutMs) {
-  return new Promise((resolve) => {
-    let output = '';
-    let settled = false;
-    const done = (result) => { if (settled) return; settled = true; resolve(result); };
-    const child = spawn(exePath, args, { cwd: path.dirname(exePath), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
-    const timer = setTimeout(() => { try { child.kill(); } catch (e) {} done({ ok: false, output: output + ' [timeout]' }); }, timeoutMs);
-    child.stdout.on('data', (d) => { output += d.toString(); });
-    child.stderr.on('data', (d) => { output += d.toString(); });
-    child.on('close', (code) => { clearTimeout(timer); done({ ok: code === 0, output }); });
-    child.on('error', (err) => { clearTimeout(timer); done({ ok: false, output: err.message }); });
-  });
-}
-
-function getPublicIP(ipCheckUrl) {
-  const https = require('https');
-  return new Promise((resolve) => {
-    const req = https.get(ipCheckUrl || 'https://api.ipify.org', (res) => {
-      let body = '';
-      res.on('data', (d) => { body += d; });
-      res.on('end', () => resolve(body.trim() || null));
-    });
-    req.on('error', () => resolve(null));
-    req.setTimeout(10000, () => { req.destroy(); resolve(null); });
-  });
-}
+// NordVPN rotation lives in ui/nordvpn-rotate.js — a CommonJS port of
+// src/nordvpn.ts sharing the same lock/cooldown/current-ip/recent files, so
+// the manual Rotate IP button and running cores coordinate instead of
+// colliding on the machine-wide tunnel.
 
 function getStopSignalFile(profileId) {
   return STOP_SIGNAL_FILE_BASE + '-' + (profileId || 'default');
-}
-
-// Geolocate a public IP via ip-api.com (free tier is HTTP-only; the lookup
-// goes through the VPN so it reports the exit's geo). Returns {country, city}
-// or null when the lookup fails.
-function geoLocateIp(ip) {
-  return new Promise((resolve) => {
-    const req = http.get(`http://ip-api.com/json/${ip}?fields=status,country,city`, (res) => {
-      let body = '';
-      res.on('data', (d) => { body += d; });
-      res.on('end', () => {
-        try {
-          const j = JSON.parse(body);
-          resolve(j && j.status === 'success' ? { country: String(j.country || ''), city: String(j.city || '') } : null);
-        } catch (e) { resolve(null); }
-      });
-    });
-    req.on('error', () => resolve(null));
-    req.setTimeout(8000, () => { req.destroy(); resolve(null); });
-  });
-}
-
-const GEO_COUNTRY_ALIASES = {
-  'united states': ['united states', 'united states of america', 'usa'],
-  'united kingdom': ['united kingdom', 'great britain', 'uk', 'england'],
-  'czech republic': ['czech republic', 'czechia'],
-  'papua new guinea': ['papua new guinea'],
-  'costa rica': ['costa rica'],
-  'france': ['france'],
-  'denmark': ['denmark']
-};
-
-function geoCountryMatches(expected, geoCountry) {
-  const g = String(geoCountry || '').trim().toLowerCase();
-  const e = String(expected || '').trim().toLowerCase();
-  if (!g || !e) return false;
-  return g === e || (GEO_COUNTRY_ALIASES[e] || []).indexOf(g) !== -1;
 }
 
 // ---- single instance lock ----
@@ -189,14 +98,13 @@ function getDefaultConfig() {
       chromeRemoteDebugPort: 9222,
       maxSlotAttempts: 10,
       slotRetryDelayMs: 10000,
-      cityRetrySeconds: 12,
+      cityRetrySeconds: 30,
       cloudflareWaitMs: 180000,
       debugNetwork: false,
       autoSolveCloudflare: true,
       headless: false,
       alertOnMajorEvents: true,
       screenshotAfterSelection: true,
-      dryRun: false,
       uiApiMismatchRetries: 2,
       uiApiMismatchRetryDelayMs: 1000,
       maxDateAttempts: 3,
@@ -230,8 +138,6 @@ function migrateLegacyConfig(raw) {
     securityQuestions: raw.securityQuestions || [],
     appointment: raw.appointment || {
       city: '',
-      month: '',
-      year: 0,
       startDate: '',
       endDate: '',
       preferredTime: null
@@ -902,12 +808,13 @@ const apiServer = http.createServer(async (req, res) => {
     cfg = migrateLegacyConfig(cfg);
     const profileCount = (cfg.profiles || []).length;
     console.log('[main] /api/profiles GET returning', profileCount, 'profiles from', CONFIG_PATH);
-    const enriched = (cfg.profiles || []).map((p) => ({
+    const enriched = await Promise.all((cfg.profiles || []).map(async (p) => ({
       ...p,
       running: runningProfiles.has(p.id),
       status: runningProfiles.get(p.id)?.status || 'Stopped',
-      checkpoints: runningProfiles.get(p.id)?.checkpoints || {}
-    }));
+      checkpoints: runningProfiles.get(p.id)?.checkpoints || {},
+      chromeConnected: await isPortOpen(p.chromeRemoteDebugPort || 9222)
+    })));
     return jsonResponse(res, {
       ok: true,
       profiles: enriched,
@@ -964,7 +871,10 @@ const apiServer = http.createServer(async (req, res) => {
       if (dupPort !== -1) {
         return jsonResponse(res, { ok: false, msg: 'Another profile already uses this remote debug port' }, 400);
       }
-      cfg.profiles[idx] = body.profile;
+      // Merge over the existing record — the edit form only carries the
+      // fields it renders, so wholesale replace would silently drop
+      // profile-level keys it doesn't know about (ipMode, specialWindowOnly, etc.).
+      cfg.profiles[idx] = { ...cfg.profiles[idx], ...body.profile };
       console.log('[main] updating profile', body.profile.username, 'count:', cfg.profiles.length);
       writeConfig(cfg);
       return jsonResponse(res, { ok: true });
@@ -988,7 +898,7 @@ const apiServer = http.createServer(async (req, res) => {
   }
 
   // Per-profile actions
-  const profileMatch = url.match(/^\/api\/profiles\/([^/]+)\/(start|stop|connect-chrome|logs|save-logs)$/);
+  const profileMatch = url.match(/^\/api\/profiles\/([^/]+)\/(start|stop|connect-chrome|show|logs|save-logs)$/);
   if (profileMatch && req.method === 'POST') {
     const profileId = profileMatch[1];
     const action = profileMatch[2];
@@ -996,6 +906,13 @@ const apiServer = http.createServer(async (req, res) => {
     if (action === 'start') return jsonResponse(res, await startProfile(profileId));
     if (action === 'stop') return jsonResponse(res, stopProfile(profileId));
     if (action === 'connect-chrome') return jsonResponse(res, await connectChrome(profileId));
+    if (action === 'show') {
+      const cfg = migrateLegacyConfig(readConfig());
+      const profile = cfg && getProfileFromConfig(cfg, profileId);
+      if (!profile) return jsonResponse(res, { ok: false, msg: 'Profile not found' }, 404);
+      const userDataDir = profile.chromeUserDataDir || getProfileDir(profile.instanceIndex);
+      return jsonResponse(res, await focusChromeWindow(profile.chromeRemoteDebugPort || 9222, userDataDir));
+    }
     if (action === 'logs') {
       const rec = runningProfiles.get(profileId);
       return jsonResponse(res, { ok: true, logs: rec ? rec.log : '', status: rec ? rec.status : 'Stopped' });
@@ -1062,118 +979,16 @@ const apiServer = http.createServer(async (req, res) => {
         ipCheckUrl: 'https://api.ipify.org'
       };
 
-      // nordvpn.exe is the GUI binary — it accepts CLI args but produces NO
-      // stdout, so "Connected" can never appear in output. The only reliable
-      // proof of connection is the public IP actually changing. Poll the IP
-      // check until it differs from BOTH the pre-rotation IP and the
-      // disconnected/direct IP (otherwise "still on direct IP" looks like a
-      // successful rotation).
-      const waitForNewIP = async (ipCheckUrl, exclude, timeoutMs) => {
-        const deadline = Date.now() + timeoutMs;
-        while (Date.now() < deadline) {
-          await new Promise(r => setTimeout(r, 2000));
-          const ip = await getPublicIP(ipCheckUrl);
-          if (ip && !exclude.includes(ip)) return ip;
-        }
-        return null;
-      };
-
-      // Pre-flight: if the NordVPN service isn't answering (app not running /
-      // service stopped), every CLI call hangs to timeout — bail out fast
-      // instead of churning through 5 connect attempts.
-      const preflight = await runNordVpnCommand(nordvpnCfg.exePath, ['status'], 10000);
-      console.log('[rotate-ip] preflight status: ok=' + preflight.ok, preflight.output.trim().substring(0, 300));
-      if (!preflight.ok || preflight.output.includes('[timeout]')) {
-        return jsonResponse(res, { ok: false, msg: 'NordVPN service is not responding. Open the NordVPN app and sign in, then try again.' });
-      }
-
-      // Get current IP before rotation
-      const oldIP = await getPublicIP(nordvpnCfg.ipCheckUrl);
-      console.log('[rotate-ip] oldIP =', oldIP);
-
-      // Disconnect
-      const disc = await runNordVpnCommand(nordvpnCfg.exePath, ['-d'], 15000);
-      console.log('[rotate-ip] disconnect:', disc.ok, disc.output.trim().substring(0, 300));
-
-      await new Promise(r => setTimeout(r, 2000));
-
-      // Measure the direct (disconnected) IP. Retry for ~12s — right after
-      // disconnect the route can still be settling, and a null here means the
-      // real IP can't be excluded during the connect poll (it would be
-      // mistaken for a "new" VPN IP). If it stays null, direct traffic is
-      // unreachable (kill switch) so any IP seen later must be a VPN IP.
-      let directIP = null;
-      for (let i = 0; i < 6 && !directIP; i += 1) {
-        directIP = await getPublicIP(nordvpnCfg.ipCheckUrl);
-        if (!directIP) await new Promise(r => setTimeout(r, 2000));
-      }
-      console.log('[rotate-ip] directIP =', directIP);
-      const excludeIPs = [oldIP, directIP];
-
-      // Try up to 5 cities walking the ordered sequence
-      let newIP = null;
-      const maxAttempts = 5;
-      const perAttemptMs = nordvpnCfg.connectTimeoutMs || 30000;
-
-      for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-        const seqPos = rotationIndex % CITY_ROTATION_SEQUENCE.length;
-        const target = CITY_ROTATION_SEQUENCE[seqPos];
-        rotationIndex += 1;
-        // -g accepts a city name directly (verified: `-g "Montgomery"` →
-        // US/Montgomery). The positional `-c <country> <city>` form is
-        // silently ignored by this CLI build — do not use it.
-        const args = ['-c', '-g', target.city];
-        const label = `${target.country} / ${target.city}`;
-        const result = await runNordVpnCommand(nordvpnCfg.exePath, args, perAttemptMs);
-        console.log(`[rotate-ip] attempt ${attempt + 1}/${maxAttempts} "${label}" (seq ${seqPos + 1}/${CITY_ROTATION_SEQUENCE.length}): cmd ok=${result.ok}`);
-        if (result.ok) {
-          newIP = await waitForNewIP(nordvpnCfg.ipCheckUrl, excludeIPs, perAttemptMs);
-          console.log(`[rotate-ip] attempt ${attempt + 1} "${label}" IP poll: newIP=${newIP}`);
-          if (newIP) {
-            // Geo-verify — a silently-ignored city arg quick-connects to the
-            // fastest server (wrong country). Reject on country mismatch.
-            const geo = await geoLocateIp(newIP);
-            console.log(`[rotate-ip] geo check: ${newIP} ->`, geo);
-            if (geo && !geoCountryMatches(target.country, geo.country)) {
-              console.log(`[rotate-ip] geo mismatch: expected ${target.country}, got ${geo.country} — rejecting`);
-              excludeIPs.push(newIP);
-              newIP = null;
-              continue;
-            }
-            break;
-          }
-        }
-      }
-
-      // Fallback: country-level connect for the last-attempted sequence
-      // country — NEVER bare `nordvpn -c` (Quick Connect lands on the fastest
-      // server, breaking the ordered sequence).
-      if (!newIP) {
-        const lastIdx = (rotationIndex - 1 + CITY_ROTATION_SEQUENCE.length) % CITY_ROTATION_SEQUENCE.length;
-        const fbCountry = CITY_ROTATION_SEQUENCE[lastIdx].country;
-        console.log(`[rotate-ip] country-group fallback: ${fbCountry}`);
-        const result = await runNordVpnCommand(nordvpnCfg.exePath, ['-c', '-g', fbCountry], perAttemptMs);
-        console.log('[rotate-ip] country fallback:', result.ok, result.output.trim().substring(0, 300));
-        if (result.ok) {
-          newIP = await waitForNewIP(nordvpnCfg.ipCheckUrl, excludeIPs, perAttemptMs);
-          if (newIP) {
-            const geo = await geoLocateIp(newIP);
-            console.log(`[rotate-ip] fallback geo check: ${newIP} ->`, geo);
-            if (geo && !geoCountryMatches(fbCountry, geo.country)) {
-              console.log(`[rotate-ip] fallback geo mismatch: expected ${fbCountry}, got ${geo.country} — rejecting`);
-              newIP = null;
-            }
-          }
-        }
-      }
-      console.log('[rotate-ip] final newIP =', newIP);
-
-      // Write current IP file for UI display
-      if (newIP) {
-        try { fs.writeFileSync(path.join(PROJECT_ROOT, '.ivac-nordvpn-current-ip'), newIP); } catch (e) {}
-      }
-
-      return jsonResponse(res, { ok: true, ip: newIP });
+      // Rotation lives in ui/nordvpn-rotate.js — honors the same lock,
+      // recent-city dedup and pool as running cores, writes the shared
+      // cooldown so cores back off after a manual rotation.
+      const result = await nordRotate.rotateNordVpn({
+        root: PROJECT_ROOT,
+        exePath: nordvpnCfg.exePath,
+        ipCheckUrl: nordvpnCfg.ipCheckUrl,
+        connectTimeoutMs: nordvpnCfg.connectTimeoutMs
+      });
+      return jsonResponse(res, { ok: result.ok, ip: result.ip || null, msg: result.msg });
     } catch (e) {
       return jsonResponse(res, { ok: false, msg: 'Rotation failed: ' + e.message });
     }

@@ -15,8 +15,12 @@ export type NordVpnConfig = {
 const LOCK_FILE = path.resolve(process.cwd(), '.ivac-nordvpn.lock');
 const COOLDOWN_FILE = path.resolve(process.cwd(), '.ivac-nordvpn-cooldown');
 const CURRENT_IP_FILE = path.resolve(process.cwd(), '.ivac-nordvpn-current-ip');
+const RECENT_FILE = path.resolve(process.cwd(), '.ivac-nordvpn-recent');
+const CITY_POOL_FILE = path.resolve(process.cwd(), 'nordvpn-cities.json');
 const COOLDOWN_MS = 2 * 60 * 1000;   // 2 minutes
-const LOCK_STALE_MS = 60 * 1000;     // 60 seconds — break stale locks
+const LOCK_STALE_MS = 60 * 1000;     // 60 seconds — break stale locks (heartbeats keep live locks fresh)
+const RECENT_MAX = 10;               // shared cross-process "recently attempted" cities
+const HUB_WEIGHT = 0.7;              // ~70% of picks come from the low-latency hub pool
 
 /**
  * NordVPN CLI-based IP rotation (machine-wide).
@@ -135,12 +139,26 @@ function geolocateIp(ip: string): Promise<{ country: string; city: string } | nu
   });
 }
 
-// Geo providers disagree on names (e.g. "Czechia" vs "Czech Republic") —
-// normalize the few names we rotate through.
+// Geo providers disagree on names (e.g. "Czechia" vs "Czech Republic",
+// "Laos" vs "Lao People's Democratic Republic") — normalize the ones in
+// the rotation pool whose ip-api name can diverge.
 const COUNTRY_ALIASES: Record<string, string[]> = {
   'united states': ['united states', 'united states of america', 'usa'],
   'united kingdom': ['united kingdom', 'great britain', 'uk', 'england'],
   'czech republic': ['czech republic', 'czechia'],
+  'south korea': ['south korea', 'korea', 'korea, republic of'],
+  'vietnam': ['vietnam', 'viet nam'],
+  'myanmar': ['myanmar', 'burma'],
+  'lao people\'s democratic republic': ['lao peoples democratic republic', 'laos', 'lao pdr'],
+  'libyan arab jamahiriya': ['libyan arab jamahiriya', 'libya'],
+  'brunei darussalam': ['brunei darussalam', 'brunei'],
+  'cape verde': ['cape verde', 'cabo verde'],
+  'turkey': ['turkey', 'turkiye', 'türkiye'],
+  'north macedonia': ['north macedonia', 'macedonia'],
+  'bosnia and herzegovina': ['bosnia and herzegovina', 'bosnia'],
+  'united arab emirates': ['united arab emirates', 'uae'],
+  'tanzania': ['tanzania', 'united republic of tanzania'],
+  'venezuela': ['venezuela', 'bolivarian republic of venezuela'],
   'papua new guinea': ['papua new guinea'],
   'costa rica': ['costa rica'],
   'france': ['france'],
@@ -246,6 +264,20 @@ export function isRotationLocked(): boolean {
   }
 }
 
+/**
+ * True when .ivac-nordvpn-current-ip was rewritten after `ts` — i.e. another
+ * ivac-core process completed a rotation during our strike ladder. Callers
+ * use this to skip their own rotation: the shared IP already changed.
+ */
+export function ipRotatedSince(ts: number): boolean {
+  try {
+    if (!fs.existsSync(CURRENT_IP_FILE)) return false;
+    return fs.statSync(CURRENT_IP_FILE).mtimeMs > ts;
+  } catch {
+    return false;
+  }
+}
+
 /** Try to acquire the rotation lock using exclusive-create. Returns true if acquired. */
 function acquireLock(): boolean {
   try {
@@ -283,55 +315,112 @@ function writeCooldown(): void {
   } catch { /* ignore */ }
 }
 
-// Ordered country → city rotation sequence (replaces the old random pool).
-// Cities are in the order returned by NordVPN's server API
-// (api.nordvpn.com/v1/servers/countries) — same order `nordvpn cities` lists.
-// Exhausts every city of a country before moving to the next country, then
-// wraps around to the first US city.
-const ROTATION_COUNTRIES: Array<{ country: string; cities: string[] }> = [
-  {
-    country: 'United States',
-    cities: [
-      'Montgomery', 'Anchorage', 'Phoenix', 'Little Rock', 'Los Angeles',
-      'San Francisco', 'Denver', 'New Haven', 'Wilmington', 'Miami',
-      'Atlanta', 'Honolulu', 'Boise', 'Chicago', 'Indianapolis',
-      'Des Moines', 'Wichita', 'Louisville', 'New Orleans', 'Lewiston',
-      'Baltimore', 'Boston', 'Detroit', 'Minneapolis', 'Jackson',
-      'Kansas City', 'Saint Louis', 'Billings', 'Omaha', 'Las Vegas',
-      'Nashua', 'Trenton', 'Albuquerque', 'Buffalo', 'New York',
-      'Charlotte', 'Fargo', 'Columbus', 'Oklahoma City', 'Portland',
-      'Pittsburgh', 'Providence', 'Charleston', 'Sioux Falls', 'Nashville',
-      'Dallas', 'Houston', 'McAllen', 'Salt Lake City', 'Burlington',
-      'Ashburn', 'Seattle', 'Huntington', 'Milwaukee', 'Cheyenne'
-    ]
-  },
-  { country: 'United Kingdom', cities: ['Edinburgh', 'Glasgow', 'London', 'Manchester'] },
-  { country: 'France', cities: ['Bordeaux', 'Marseille', 'Paris', 'Strasbourg'] },
-  { country: 'Denmark', cities: ['Copenhagen'] },
-  { country: 'Czech Republic', cities: ['Prague'] },
-  { country: 'Papua New Guinea', cities: ['Port Moresby'] },
-  { country: 'Costa Rica', cities: ['San Jose'] }
-];
+// Fallback pool — used only when nordvpn-cities.json is missing/unreadable
+// (e.g. packaged build without the file). Treats the old sequence as one
+// flat hub pool.
+const FALLBACK_CITIES: Array<{ country: string; city: string }> = [
+  'Montgomery', 'Anchorage', 'Phoenix', 'Little Rock', 'Los Angeles',
+  'San Francisco', 'Denver', 'New Haven', 'Wilmington', 'Miami',
+  'Atlanta', 'Honolulu', 'Boise', 'Chicago', 'Indianapolis',
+  'Des Moines', 'Wichita', 'Louisville', 'New Orleans', 'Lewiston',
+  'Baltimore', 'Boston', 'Detroit', 'Minneapolis', 'Jackson',
+  'Kansas City', 'Saint Louis', 'Billings', 'Omaha', 'Las Vegas',
+  'Nashua', 'Trenton', 'Albuquerque', 'Buffalo', 'New York',
+  'Charlotte', 'Fargo', 'Columbus', 'Oklahoma City', 'Portland',
+  'Pittsburgh', 'Providence', 'Charleston', 'Sioux Falls', 'Nashville',
+  'Dallas', 'Houston', 'McAllen', 'Salt Lake City', 'Burlington',
+  'Ashburn', 'Seattle', 'Huntington', 'Milwaukee', 'Cheyenne'
+].map((city) => ({ country: 'United States', city }));
 
-const CITY_ROTATION_SEQUENCE: Array<{ country: string; city: string }> =
-  ROTATION_COUNTRIES.flatMap(({ country, cities }) =>
-    cities.map((city) => ({ country, city }))
-  );
+type CityTarget = { country: string; city: string };
+type CityPool = { hubs: CityTarget[]; rest: CityTarget[] };
 
-// Current position in CITY_ROTATION_SEQUENCE. In-memory only — each process
-// starts at US city 1 (per spec, no persistence across restarts).
-let rotationIndex = 0;
+// undefined = not loaded yet; null = file missing/broken (fallback active).
+let cityPool: CityPool | null | undefined;
+// Per-process shuffle bags — each entry is consumed once, then the bag is
+// reshuffled. Random-looking order, guaranteed coverage, no back-to-back
+// repeats within a process.
+let hubBag: CityTarget[] = [];
+let restBag: CityTarget[] = [];
+
+function shuffle<T>(arr: T[]): T[] {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+function loadCityPool(): CityPool {
+  if (cityPool !== undefined) return cityPool || { hubs: FALLBACK_CITIES, rest: [] };
+  try {
+    const raw = JSON.parse(fs.readFileSync(CITY_POOL_FILE, 'utf8'));
+    const valid = (e: any): e is CityTarget =>
+      !!e && typeof e.country === 'string' && typeof e.city === 'string';
+    const hubs = (Array.isArray(raw.hubs) ? raw.hubs : []).filter(valid);
+    const rest = (Array.isArray(raw.rest) ? raw.rest : []).filter(valid);
+    cityPool = (hubs.length + rest.length) > 0 ? { hubs, rest } : null;
+    if (cityPool) {
+      info(`[NORDVPN] City pool loaded from nordvpn-cities.json: ${hubs.length} hubs, ${rest.length} other.`);
+    }
+  } catch (err) {
+    cityPool = null;
+    warn(`[NORDVPN] nordvpn-cities.json unreadable (${err instanceof Error ? err.message : String(err)}) — using built-in fallback pool.`);
+  }
+  return cityPool || { hubs: FALLBACK_CITIES, rest: [] };
+}
+
+/** Read the shared recently-attempted cities (last RECENT_MAX, all profiles). */
+function readRecentCities(): Set<string> {
+  try {
+    const arr = JSON.parse(fs.readFileSync(RECENT_FILE, 'utf8'));
+    if (!Array.isArray(arr)) return new Set();
+    return new Set(arr.map((e: any) => `${e.country}|${e.city}`));
+  } catch {
+    return new Set();
+  }
+}
+
+/** Record an attempted city so other profiles don't re-pick it right away. */
+function pushRecentCity(t: CityTarget): void {
+  try {
+    let arr: CityTarget[] = [];
+    try { arr = JSON.parse(fs.readFileSync(RECENT_FILE, 'utf8')); } catch { /* fresh */ }
+    if (!Array.isArray(arr)) arr = [];
+    arr.unshift({ country: t.country, city: t.city });
+    fs.writeFileSync(RECENT_FILE, JSON.stringify(arr.slice(0, RECENT_MAX)));
+  } catch { /* best-effort */ }
+}
+
+/**
+ * Pick the next rotation target: ~70% from the hub pool, ~30% from rest,
+ * each via a per-process shuffle bag (no repeats until the bag drains).
+ * Cities in the shared recent list are skipped while alternatives exist.
+ */
+function pickCityTarget(recent: Set<string>): CityTarget {
+  const pool = loadCityPool();
+  if (!hubBag.length) hubBag = shuffle(pool.hubs);
+  if (!restBag.length) restBag = shuffle(pool.rest);
+  const preferHub = Math.random() < HUB_WEIGHT;
+  const bag = preferHub
+    ? (hubBag.length ? hubBag : restBag)
+    : (restBag.length ? restBag : hubBag);
+  let idx = bag.findIndex((t) => !recent.has(`${t.country}|${t.city}`));
+  if (idx === -1) idx = 0;   // whole bag recently used — take the top anyway
+  return bag.splice(idx, 1)[0];
+}
 
 /**
  * Main rotation function -- called by cores on block triggers.
  *
  * Flow:
  * 1. Check cooldown -- skip if active
- * 2. Acquire lock -- skip if another process is rotating
- * 3. Get current IP
- * 4. Disconnect NordVPN
- * 5. Try up to 5 cities walking CITY_ROTATION_SEQUENCE (nordvpn -c <country> <city>)
- * 6. If all city attempts fail, fall back to Quick Connect (nordvpn -c)
+ * 2. Lock held? Wait up to 45s for the other rotation; reuse its new IP if one lands
+ * 3. Acquire lock, heartbeat it every 10s while rotating
+ * 4. Get current IP, disconnect NordVPN, measure direct IP
+ * 5. Try up to 5 random picks from nordvpn-cities.json (nordvpn -c -g <city>)
+ * 6. If all city attempts fail, fall back to the last attempted country group
  * 7. Get new IP
  * 8. Write current IP file
  * 9. Write cooldown
@@ -346,16 +435,40 @@ export async function rotateNordVpn(config: NordVpnConfig, isAborted?: () => boo
     return { ip: null, rotated: false };
   }
 
-  // 2. Lock check
+  // 2. Lock check — another process may already be rotating the shared IP.
+  // Wait a bounded time for it instead of skipping blind: when it finishes,
+  // .ivac-nordvpn-current-ip updates and the new IP works for us too.
   if (isRotationLocked()) {
-    info(`[NORDVPN] Rotation locked by another process — skipping${reason ? ` (requested: ${reason})` : ''}.`);
-    return { ip: null, rotated: false };
+    info(`[NORDVPN] Rotation in progress elsewhere — waiting up to 45s for it to finish${reason ? ` (requested: ${reason})` : ''}.`);
+    const waitStart = Date.now();
+    const deadline = waitStart + 45000;
+    while (isRotationLocked() && Date.now() < deadline && !(isAborted && isAborted())) {
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+    if (ipRotatedSince(waitStart)) {
+      info('[NORDVPN] Shared IP was rotated by another process — reusing it, no rotation needed.');
+      return { ip: null, rotated: false };
+    }
+    if (isRotationLocked()) {
+      info('[NORDVPN] Lock still held after waiting — skipping this rotation.');
+      return { ip: null, rotated: false };
+    }
+    // Lock released with no completed rotation (failed or aborted attempt)
+    // — proceed and try our own below.
+    info('[NORDVPN] Lock released without a completed rotation — proceeding.');
   }
 
   if (!acquireLock()) {
     info(`[NORDVPN] Could not acquire lock — another process may be rotating${reason ? ` (requested: ${reason})` : ''}.`);
     return { ip: null, rotated: false };
   }
+
+  // Heartbeat: a real rotation takes 2-4 min (5 city attempts × ~68s), far
+  // past the 60s stale window — touch the lock every 10s so a live rotation
+  // is never mistaken for a dead one and broken into.
+  const heartbeat = setInterval(() => {
+    try { fs.utimesSync(LOCK_FILE, new Date(), new Date()); } catch { /* ignore */ }
+  }, 10000);
 
   try {
     // Log the root cause in BOTH client and dev logs — rotation reason is the
@@ -401,10 +514,13 @@ export async function rotateNordVpn(config: NordVpnConfig, isAborted?: () => boo
     }
     const excludeIPs: Array<string | null> = [oldIP, directIP];
 
-    // 5. Try up to 5 cities walking the ordered sequence, then Quick Connect
+    // 5. Try up to 5 random picks from the city pool (weighted: hubs ~70%),
+    // skipping cities other profiles just attempted.
     let connected = false;
     let newIP: string | null = null;
     const maxCityAttempts = 5;
+    const recent = readRecentCities();
+    let lastTarget: CityTarget | null = null;
 
     for (let attempt = 0; attempt < maxCityAttempts; attempt += 1) {
       if (isAborted && isAborted()) {
@@ -412,11 +528,12 @@ export async function rotateNordVpn(config: NordVpnConfig, isAborted?: () => boo
         return { ip: null, rotated: false };
       }
 
-      const seqPos = rotationIndex % CITY_ROTATION_SEQUENCE.length;
-      const target = CITY_ROTATION_SEQUENCE[seqPos];
-      rotationIndex += 1;
+      const target = pickCityTarget(recent);
+      lastTarget = target;
+      pushRecentCity(target);
+      recent.add(`${target.country}|${target.city}`);
 
-      info(`[NORDVPN] Rotation attempt ${attempt + 1}/${maxCityAttempts}: ${target.country} / ${target.city} (sequence ${seqPos + 1}/${CITY_ROTATION_SEQUENCE.length})`);
+      info(`[NORDVPN] Rotation attempt ${attempt + 1}/${maxCityAttempts}: ${target.country} / ${target.city}`);
       newIP = await connectNordVpn(config.exePath, config.ipCheckUrl, config.connectTimeoutMs, isAborted, target, excludeIPs);
 
       if (newIP) {
@@ -424,15 +541,14 @@ export async function rotateNordVpn(config: NordVpnConfig, isAborted?: () => boo
         info(`[NORDVPN] Connected to ${target.country} / ${target.city}. New IP: ${newIP}`);
         break;
       }
-      warn(`[NORDVPN] Connect to ${target.country} / ${target.city} produced no new IP. Trying next city...`);
+      warn(`[NORDVPN] Connect to ${target.country} / ${target.city} produced no new IP. Trying another city...`);
     }
 
-    // 6. Fallback: country-level connect for the last-attempted sequence
-    // country — NEVER bare `nordvpn -c` (Quick Connect lands on the fastest
-    // server, typically India, breaking the ordered sequence).
-    if (!connected) {
-      const lastIdx = (rotationIndex - 1 + CITY_ROTATION_SEQUENCE.length) % CITY_ROTATION_SEQUENCE.length;
-      const fallbackCountry = CITY_ROTATION_SEQUENCE[lastIdx].country;
+    // 6. Fallback: country-level connect for the last-attempted country —
+    // NEVER bare `nordvpn -c` (Quick Connect lands on the fastest server,
+    // typically India, with no country control).
+    if (!connected && lastTarget) {
+      const fallbackCountry = lastTarget.country;
       info(`[NORDVPN] City connects failed — country-group fallback: ${fallbackCountry}`);
       newIP = await connectNordVpn(config.exePath, config.ipCheckUrl, config.connectTimeoutMs, isAborted, { country: fallbackCountry }, excludeIPs);
       connected = !!newIP;
@@ -456,6 +572,7 @@ export async function rotateNordVpn(config: NordVpnConfig, isAborted?: () => boo
     warn('[NORDVPN] Rotation failed:', err instanceof Error ? err.message : String(err));
     return { ip: null, rotated: false };
   } finally {
+    clearInterval(heartbeat);
     // 9. Always write cooldown (prevents rapid retry loops even on failure)
     writeCooldown();
     // 10. Release lock

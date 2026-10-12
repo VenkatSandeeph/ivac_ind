@@ -5,7 +5,7 @@ import type { Page } from 'patchright';
 import { launchBrowser, connectToBrowser, ensureChromeRunning } from './browser';
 import { loadConfig } from './config';
 import type { AutomationConfig } from './config';
-import { rotateNordVpn } from './nordvpn';
+import { rotateNordVpn, ipRotatedSince } from './nordvpn';
 import { monitorNetwork } from './network-monitor';
 import { saveScreenshot, savePageState } from './diagnostics';
 import { login, handlePrivacyActStatement } from './auth';
@@ -51,7 +51,7 @@ import {
   STATIC_ROTATE_FLAG,
   type StaticProxyRelay
 } from './static-proxy';
-import { setupApiResponseCapture, runDirectOfcFlow, resetCapturedScheduleData, getMemberQueryResult, resetMemberQueryResult, type DirectApiResult } from './api-direct';
+import { setupApiResponseCapture, runDirectOfcFlow, resetCapturedScheduleData, getMemberQueryResult, resetMemberQueryResult, consumeLateEntriesRescue, type DirectApiResult } from './api-direct';
 import { playBeep } from './beep';
 import { recordSlotObservation } from './slot-tracker';
 
@@ -206,6 +206,7 @@ function abortSpecialSweep(reason: string): void {
  *      navigate to the home page again.
  */
 async function recoverFromBlockPage(page: Page, config: any, reason: string | null, where: string) {
+  const enteredAt = Date.now();  // another profile may rotate the shared IP mid-recovery — checked before our own rotate
   if (reason === 'rate_limited') {
     warn(`[RATE LIMIT] Transient rate-limit page ${where} — backing off 60s on the same IP (no rotation).`);
     client('⏳', 'Rate-limited — cooling down 60s (keeping IP)...');
@@ -247,7 +248,11 @@ async function recoverFromBlockPage(page: Page, config: any, reason: string | nu
     } catch (e) {
       warn('[HARD BLOCK] Cache clear failed (continuing):', e instanceof Error ? e.message : String(e));
     }
-    await rotateEgress(config, isAborted, false, `Hard block ${where}: Cloudflare IP block (persisted after home retry)`).catch(() => null);
+    if (ipRotatedSince(enteredAt)) {
+      info('[HARD BLOCK] Shared IP already rotated by another process during recovery — reusing it (no rotation).');
+    } else {
+      await rotateEgress(config, isAborted, false, `Hard block ${where}: Cloudflare IP block (persisted after home retry)`).catch(() => null);
+    }
     await page.goto(getHomePageUrl(config.scheduleUrl), { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null);
     await waitForHumanVerificationIfNeeded(page, config.cloudflareWaitMs, config.autoSolveCloudflare, isAborted).catch(() => null);
     await page.waitForTimeout(3000);
@@ -266,7 +271,11 @@ async function recoverFromBlockPage(page: Page, config: any, reason: string | nu
   } catch (e) {
     warn('[HARD BLOCK] Cache clear failed (continuing):', e instanceof Error ? e.message : String(e));
   }
-  await rotateEgress(config, isAborted, false, `Hard block ${where}: ${reasonLabel}`).catch(() => null);
+  if (ipRotatedSince(enteredAt)) {
+    info('[HARD BLOCK] Shared IP already rotated by another process during recovery — reusing it (no rotation).');
+  } else {
+    await rotateEgress(config, isAborted, false, `Hard block ${where}: ${reasonLabel}`).catch(() => null);
+  }
   await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(async () => {
     info('[HARD BLOCK] Reload failed, navigating to schedule URL directly.');
     await page.goto(config.scheduleUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null);
@@ -316,6 +325,7 @@ async function runConsularStageWithRecovery(
   const consularRetryMs = 12000; // 12s base delay between consular monitoring attempts
   const max403Retries = 3;       // max 403 recovery cycles before waiting longer
   let consecutive403 = 0;
+  let consular403StartTs = 0;
 
   for (;;) {
     if (checkStopSignal()) {
@@ -380,6 +390,7 @@ async function runConsularStageWithRecovery(
       // Check for Cloudflare verification page (403 redirects to verification)
       const isVerification = await isHumanVerificationPresent(page).catch(() => false);
       if (isVerification) {
+        if (consecutive403 === 0) consular403StartTs = Date.now();
         consecutive403++;
         info(`Consular monitoring: Cloudflare verification detected (403 recovery #${consecutive403}).`);
         warn('Consular stage: HTTP 403 block detected. Navigating to home page for recovery.');
@@ -387,8 +398,14 @@ async function runConsularStageWithRecovery(
         // Three-strike: rotate NordVPN IP on 3rd consecutive 403
         if (consecutive403 >= 3) {
           if (config.autoRotateIp) {
-            info('[NORDVPN] Consular 403 ×3 — rotating NordVPN IP.');
-            await rotateEgress(config, isAborted, false, 'Consular stage: 3 consecutive 403 blocks').catch(() => null);
+            if (ipRotatedSince(consular403StartTs)) {
+              // Another profile already rotated the shared IP during this
+              // ladder — reuse it instead of rotating again.
+              info('[NORDVPN] Consular 403 ×3 — shared IP already rotated by another process; reusing it (no rotation).');
+            } else {
+              info('[NORDVPN] Consular 403 ×3 — rotating NordVPN IP.');
+              await rotateEgress(config, isAborted, false, 'Consular stage: 3 consecutive 403 blocks').catch(() => null);
+            }
             // Reload the page to clear stale Cloudflare session after IP rotation.
             client('🔄', 'Refreshing page after IP rotation...');
             await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null);
@@ -1323,6 +1340,8 @@ async function main() {
     : [config.appointment.city];
   let cityIndex = 0;
   let consecutiveBlockCount = 0;  // combined 403/429 counter for two-strike city-then-rotate logic
+  let blockLadderStartTs = 0;     // when the current strike ladder began — for detecting another profile's rotation
+  let appErrorLadderStartTs = 0;
   let blockCycleCount = 0;        // how many full strike ladders fired without a clean response — guards against rotating forever on account-scoped blocks
   let consecutiveAppErrorCount = 0; // app-level errors (HTTP 200 + HasError, e.g. SGA14) — separate ladder, never resets the block counter
 
@@ -1674,6 +1693,7 @@ async function main() {
       (memberBlocked && !hasUsableResult ? memberRes.status : null);
 
     if (effectiveBlockStatus) {
+      if (consecutiveBlockCount === 0) blockLadderStartTs = Date.now();
       consecutiveBlockCount += 1;
       const blockType = effectiveBlockStatus === 403 ? '403' : '429';
       const blockedRoute = daysBlockStatus ? 'get-family-ofc-schedule-days' : 'query-family-members-ofc';
@@ -1722,6 +1742,18 @@ async function main() {
           warn(`HTTP ${blockType} ×${consecutiveBlockCount} inside drop window — server load; holding IP (no rotation).`);
           client('⏳', `${blockType} ×${consecutiveBlockCount} during drop window — server busy, keeping IP...`);
         } else if (config.autoRotateIp) {
+          if (ipRotatedSince(blockLadderStartTs)) {
+            // Another ivac-core already rotated the machine-wide IP while
+            // this ladder was climbing — the new shared IP is already live,
+            // so a second rotation would just blackout every profile again.
+            warn(`HTTP ${blockType} ×${consecutiveBlockCount} — shared IP already rotated by another process; reusing it (no rotation).`);
+            client('🔄', 'IP already rotated — resuming on the new IP...');
+            blockCycleCount = Math.max(0, blockCycleCount - 1); // no rotation was spent on this cycle
+            consecutiveBlockCount = 0;
+            await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null);
+            await waitForHumanVerificationIfNeeded(page, config.cloudflareWaitMs, config.autoSolveCloudflare, isAborted).catch(() => null);
+            continue;
+          }
           // Third consecutive 403/429 — the session/IP is likely burned.
           warn(`HTTP ${blockType} received for ${consecutiveBlockCount} consecutive cities. Forcing NordVPN IP rotation.`);
           uiStatus('Rotating IP');
@@ -1897,6 +1929,7 @@ async function main() {
     const serverErrStatus = !!(scheduleResult && scheduleResult.status !== null && scheduleResult.status >= 500);
 
     if ((appErrCode || serverErrStatus) && !hasUsableResult) {
+      if (consecutiveAppErrorCount === 0) appErrorLadderStartTs = Date.now();
       consecutiveAppErrorCount += 1;
       // Prefer the real upstream member-query failure over the synthetic
       // NO_GROUP_MEMBERS label — it names the actual root cause.
@@ -1912,10 +1945,16 @@ async function main() {
       // bare 403, so spend one IP rotation here.
       if (consecutiveAppErrorCount === 5) {
         if (config.autoRotateIp) {
-          warn(`[APP_ERROR] ${consecutiveAppErrorCount} consecutive app errors — forcing NordVPN IP rotation.`);
-          client('🔄', 'Repeated server errors — rotating IP…');
-          uiStatus('Rotating IP');
-          await rotateEgress(config, isAborted, true, `OFC app error ${code} ×${consecutiveAppErrorCount}`).catch(() => null);
+          if (ipRotatedSince(appErrorLadderStartTs)) {
+            // Another profile already rotated the shared IP while this
+            // ladder was climbing — reuse it instead of rotating again.
+            info(`[APP_ERROR] ${consecutiveAppErrorCount} consecutive app errors — shared IP already rotated by another process; reusing it (no rotation).`);
+          } else {
+            warn(`[APP_ERROR] ${consecutiveAppErrorCount} consecutive app errors — forcing NordVPN IP rotation.`);
+            client('🔄', 'Repeated server errors — rotating IP…');
+            uiStatus('Rotating IP');
+            await rotateEgress(config, isAborted, true, `OFC app error ${code} ×${consecutiveAppErrorCount}`).catch(() => null);
+          }
           await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null);
           await waitForHumanVerificationIfNeeded(page, config.cloudflareWaitMs, config.autoSolveCloudflare, isAborted).catch(() => null);
           resetMemberQueryResult();
@@ -1996,50 +2035,34 @@ async function main() {
         return { success: false, fallback: true } as DirectApiResult;
       });
 
-      if (directResult.fallback === true) {
-        // Only count actual Cloudflare blocks toward the session block —
-        // context-extraction failures retry freely on the next city select.
-        if (directResult.reason === 'blocked') {
-          directApiBlockStrikes++;
-          if (directApiBlockStrikes >= 3) {
-            directApiBlocked = true;
-            warn('Direct API blocked by Cloudflare 3× consecutively — using DOM flow for remainder of session');
-          } else {
-            warn(`Direct API blocked by Cloudflare (strike ${directApiBlockStrikes}/3) — fast path retries on next attempt`);
-          }
-        } else {
-          directApiBlockStrikes = 0;
-        }
-        info('Direct API did not succeed — continuing with DOM-based flow');
-      } else if (directResult.success) {
-        // OFC appointment booked via direct API!
-        info('OFC appointment booked via direct API! Proceeding to consular stage.');
-        client('✅', `OFC BOOKED! Date=${directResult.bookedDate || '?'} Time=${directResult.bookedTime || '?'}`);
+      // Shared OFC-booked completion: notifications → consular stage →
+      // final bookkeeping. Used by the normal direct-API success AND by
+      // the late-entries rescue below (same outcome, different trigger).
+      const handleDirectOfcSuccess = async (result: DirectApiResult, method: string): Promise<void> => {
+        info(`OFC appointment booked (${method})! Proceeding to consular stage.`);
+        client('✅', `OFC BOOKED! Date=${result.bookedDate || '?'} Time=${result.bookedTime || '?'}`);
 
-        // Log to Supabase
         sendSupabaseEvent('ofc_submitted', {
           username: config.username,
           runId,
           attempt,
           city: currentCity,
-          date: directResult.bookedDate || '',
-          time: directResult.bookedTime || '',
-          method: 'direct_api',
+          date: result.bookedDate || '',
+          time: result.bookedTime || '',
+          method,
           url: page.url(),
           timestamp: new Date().toISOString()
         }).catch(() => null);
 
-        // Send Telegram notification (fire-and-forget — never blocks the booking loop)
+        // Telegram notification (fire-and-forget — never blocks the booking loop)
         sendOfcBookedNotification({
           username: config.username,
           city: currentCity,
-          date: directResult.bookedDate || '',
-          time: directResult.bookedTime || ''
+          date: result.bookedDate || '',
+          time: result.bookedTime || ''
         }).catch(() => null);
 
         // Open notification video immediately on OFC success (only once).
-        // This alerts the user that OFC was booked, even if consular takes
-        // a long time or gets stuck on 403 errors.
         if (!notificationVideoOpened) {
           info('OFC booked — opening notification video (consular will continue in background)...');
           client('🔔', 'Notification sent — consular booking in progress...');
@@ -2059,8 +2082,8 @@ async function main() {
             state: 'booked',
             attempt,
             city: currentCity,
-            date: directResult.bookedDate || '',
-            time: directResult.bookedTime || '',
+            date: result.bookedDate || '',
+            time: result.bookedTime || '',
             url: page.url(),
             timestamp: new Date().toISOString()
           });
@@ -2068,10 +2091,10 @@ async function main() {
             runId,
             attempt,
             city: currentCity,
-            date: directResult.bookedDate || '',
-            time: directResult.bookedTime || '',
+            date: result.bookedDate || '',
+            time: result.bookedTime || '',
             url: page.url(),
-            method: 'direct_api'
+            method
           });
           info('Consular appointment booked! Full success (OFC + consular).');
           client('✅', 'CONSULAR BOOKED! Full appointment complete!');
@@ -2080,10 +2103,10 @@ async function main() {
             runId,
             attempt,
             city: currentCity,
-            date: directResult.bookedDate || '',
-            time: directResult.bookedTime || '',
+            date: result.bookedDate || '',
+            time: result.bookedTime || '',
             url: page.url(),
-            method: 'direct_api',
+            method,
             timestamp: new Date().toISOString()
           }).catch(() => null);
         } else {
@@ -2091,6 +2114,26 @@ async function main() {
           warn('Consular stage did not complete; OFC was booked but consular appointment was NOT booked.');
           warn('The OFC appointment is still valid — you may need to manually book the consular appointment.');
         }
+      };
+
+      if (directResult.fallback === true) {
+        // Only count actual Cloudflare blocks toward the session block —
+        // context-extraction failures retry freely on the next city select.
+        if (directResult.reason === 'blocked') {
+          directApiBlockStrikes++;
+          if (directApiBlockStrikes >= 3) {
+            directApiBlocked = true;
+            warn('Direct API blocked by Cloudflare 3× consecutively — using DOM flow for remainder of session');
+          } else {
+            warn(`Direct API blocked by Cloudflare (strike ${directApiBlockStrikes}/3) — fast path retries on next attempt`);
+          }
+        } else {
+          directApiBlockStrikes = 0;
+        }
+        info('Direct API did not succeed — continuing with DOM-based flow');
+      } else if (directResult.success) {
+        // OFC appointment booked via direct API!
+        await handleDirectOfcSuccess(directResult, 'direct_api');
         break; // exit main loop
       } else {
         // Direct API completed but no slots/dates — same as DOM flow finding no slots
@@ -2111,9 +2154,28 @@ async function main() {
             info(`SPECIAL WINDOW: Trigger :${formatTriggerMMSS(specialTrigger)} in ${(delayMs / 1000).toFixed(1)}s — timing city selection to hit the drop`);
             await preciseSleepUntilSpecialWindow(specialTrigger);
             beginSpecialSweep(appointmentCities, cityIndex);
-          } else if (await sleepWithStopSignal(delayMs)) {
-            info('Stop signal detected during exhausted-flow wait; exiting main loop.');
-            break;
+          } else {
+            // Late-entries rescue (backup path): if the fast flow timed out
+            // with a getScheduleEntries request still in flight, listen for
+            // the late response during this wait — dead time the loop
+            // already spends. The rescue is consumed before the next city
+            // selection, where the per-city context would die anyway.
+            const rescueP = consumeLateEntriesRescue(page, config, delayMs).catch(() => null);
+            if (await sleepWithStopSignal(delayMs)) {
+              info('Stop signal detected during exhausted-flow wait; exiting main loop.');
+              break;
+            }
+            // The wait elapsed. If a rescue capture landed near the end and
+            // a submit is mid-flight, give it a bounded settle window — only
+            // ever extends the loop when a real submit is in progress.
+            const rescueResult = await Promise.race<DirectApiResult | null>([
+              rescueP,
+              new Promise<null>((resolve) => setTimeout(() => resolve(null), 25000))
+            ]);
+            if (rescueResult && rescueResult.success) {
+              await handleDirectOfcSuccess(rescueResult, 'direct_api_late_rescue');
+              break;
+            }
           }
           continue;
         }

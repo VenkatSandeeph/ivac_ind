@@ -36,7 +36,7 @@ flowchart LR
 |---|---|
 | `index.ts` | Main orchestrator — infinite loop, page-state machine (`resumeFromCurrentPage`), health checks, error recovery, `recoverFromBlockPage` (staged hard-block recovery), city rotation, special-window timing (`:MM:58` triggers), checkpoints, direct API integration |
 | `api-direct.ts` | 3-tier fast OFC submission (details below) |
-| `ofc-schedule.ts` | `navigateToOfcSchedule` (with `isHardBlocked` checks after home nav + schedule-link click), city dropdown selection with DOM event dispatch, time-slot selection (preferred or highest-availability), submission with `dryRun` |
+| `ofc-schedule.ts` | `navigateToOfcSchedule` (with `isHardBlocked` checks after home nav + schedule-link click), city dropdown selection with DOM event dispatch, time-slot selection (preferred or highest-availability), submission |
 | `consular-schedule.ts` | Consular stage scheduling (entered after OFC success) |
 | `calendar.ts` | Calendar readiness, month/year `<select>` manipulation, date extraction from `td[data-month][data-year]`, date click with in-page dispatch fallback |
 | `schedule-api.ts` | Intercepts `get-family-ofc-schedule-days` responses; JSON extraction with malformed-JSON fallback |

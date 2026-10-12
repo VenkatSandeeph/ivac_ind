@@ -30,7 +30,7 @@
 | `auth.ts` | Login form detection, credential entry with human-like delays, submit with retry (up to 3 attempts), credential error detection |
 | `security-questions.ts` | Security question matching (fuzzy substring), answer field location via DOM traversal, form submission |
 | `cloudflare.ts` | Turnstile/CAPTCHA detection (12 selectors + body text regex), 4-strategy auto-solve with Bezier curve mouse movement, fallback to manual wait |
-| `ofc-schedule.ts` | City dropdown selection with DOM event dispatch, time slot selection (preferred or highest-availability), appointment submission with dryRun support |
+| `ofc-schedule.ts` | City dropdown selection with DOM event dispatch, time slot selection (preferred or highest-availability), appointment submission |
 | `consular-schedule.ts` | Consular appointment scheduling -- city selection, date/time selection, and submission for the consular stage (navigated to after OFC success) |
 | `calendar.ts` | Calendar readiness check, month/year `<select>` manipulation, available date extraction from `td[data-month][data-year]`, date clicking with in-page event dispatch fallback |
 | `schedule-api.ts` | Network response interceptor for `get-family-ofc-schedule-days` POST requests, JSON extraction with malformed-JSON fallback |
@@ -280,7 +280,7 @@ powershell -NoProfile -Command "Compress-Archive -Path 'release<N>/win-unpacked\
 
 - **`selectFirstAvailableTime(page, preferredTime)`** -- Reads time rows from `#time_select tbody tr`. For each row, reads `data-slots` attribute (or falls back to cell text) for availability count. If `preferredTime` matches a row's text, selects it immediately. Otherwise selects the row with highest availability (minimum 1 slot). Uses `page.evaluate()` to programmatically check the radio button and dispatch events.
 
-- **`submitAppointment(page, config)`** -- Waits for `#submitbtn` to become enabled (up to 15s). Falls back to role-based button lookup. Respects `dryRun`. Sends Supabase event before clicking. Returns `true` on success, `false` on failure.
+- **`submitAppointment(page, config)`** -- Waits for `#submitbtn` to become enabled (up to 15s). Falls back to role-based button lookup. Sends Supabase event before clicking. Returns `true` on success, `false` on failure.
 
 - **`parseManualResponse(response)`** -- Extracted helper that parses schedule API JSON responses (with fallback for malformed JSON). Used to detect manual city selections by the user in the browser.
 
@@ -716,7 +716,7 @@ main()
         |     |     |     +-- If no time -> retry date/time loop
         |     |     +-- Save checkpoint (state: time_selected)
         |     |     +-- Screenshot (if enabled)
-        |     |     +-- submitAppointment (respects dryRun)
+        |     |     +-- submitAppointment
         |     |     +-- If booked -> save checkpoint (state: booked), break
         |     |     +-- If submit failed -> retry date/time loop
         |     |
@@ -786,7 +786,6 @@ type AutomationConfig = {
   headless: boolean;
   alertOnMajorEvents: boolean;
   screenshotAfterSelection: boolean;
-  dryRun: boolean;
   uiApiMismatchRetries: number;
   uiApiMismatchRetryDelayMs: number;
   maxDateAttempts: number;

@@ -297,7 +297,7 @@ function renderProfiles() {
       <div class="profile-row${selected}" data-id="${p.id}">
         <div class="profile-info" onclick="window.selectProfile('${p.id}')">
           <div class="profile-user">${p.username || 'Unknown'}${isSelectedForLogs}</div>
-          <div class="profile-detail">${cities} &bull; ${a.month || ''} ${a.year || ''}</div>
+          <div class="profile-detail">${cities}</div>
           <div class="profile-range">${a.startDate || ''} &rarr; ${a.endDate || ''}</div>
           <div class="profile-status-line">Status: <b>${status}</b></div>
           <div class="profile-checkpoints">${chips}</div>
@@ -307,6 +307,7 @@ function renderProfiles() {
           <button class="small" onclick="event.stopPropagation(); window.editProfile('${p.id}')">Edit</button>
           <button class="small primary" onclick="event.stopPropagation(); window.startProfile('${p.id}')" ${isRunning ? 'disabled' : ''}>Start</button>
           <button class="small" onclick="event.stopPropagation(); window.connectChrome('${p.id}')">Connect</button>
+          <button class="small" onclick="event.stopPropagation(); window.showChrome('${p.id}')" ${!p.chromeConnected ? 'disabled' : ''}>Show</button>
           <button class="small danger" onclick="event.stopPropagation(); window.stopProfile('${p.id}')" ${!isRunning ? 'disabled' : ''}>Stop</button>
         </div>
       </div>
@@ -415,8 +416,20 @@ async function connectChrome(id) {
     const res = await fetch('/api/profiles/' + id + '/connect-chrome', { method: 'POST' });
     const data = await res.json();
     if (!data.ok) showAlert(data.msg || 'Connect failed');
+    await loadProfiles();
   } catch {
     showAlert('Server error while connecting.');
+  }
+}
+
+// Bring the profile's Chrome window to the foreground (un-minimize + focus).
+async function showChrome(id) {
+  try {
+    const res = await fetch('/api/profiles/' + id + '/show', { method: 'POST' });
+    const data = await res.json();
+    if (!data.ok) showAlert(data.msg || 'Show failed');
+  } catch {
+    showAlert('Server error while showing window.');
   }
 }
 
@@ -484,11 +497,10 @@ function openModal(profile) {
     document.querySelectorAll('.city-checks input').forEach((cb) => {
       cb.checked = cities.includes(cb.value);
     });
-    document.getElementById('pMonth').value = a.month || 'Sep';
-    document.getElementById('pYear').value = a.year || 2026;
     document.getElementById('pStartDate').value = a.startDate || '';
     document.getElementById('pEndDate').value = a.endDate || '';
     document.getElementById('pPreferredTime').value = a.preferredTime || '';
+    document.getElementById('pCityRetrySeconds').value = profile.cityRetrySeconds ?? 30;
     document.getElementById('pDebugPort').value = profile.chromeRemoteDebugPort || 9222;
     document.getElementById('pUserDataDir').value = profile.chromeUserDataDir || '';
   } else {
@@ -500,11 +512,10 @@ function openModal(profile) {
     document.getElementById('pPassword').value = '';
     fillSecurityQuestions([]);
     document.querySelectorAll('.city-checks input').forEach((cb) => cb.checked = false);
-    document.getElementById('pMonth').value = 'Sep';
-    document.getElementById('pYear').value = 2026;
     document.getElementById('pStartDate').value = '';
     document.getElementById('pEndDate').value = '';
     document.getElementById('pPreferredTime').value = '';
+    document.getElementById('pCityRetrySeconds').value = 30;
     document.getElementById('pDebugPort').value = 9222;
     document.getElementById('pUserDataDir').value = '';
   }
@@ -576,10 +587,10 @@ function buildProfileFromForm(onDone) {
     return;
   }
 
-  const month = document.getElementById('pMonth').value;
-  const year = parseInt(document.getElementById('pYear').value, 10);
   const startDate = document.getElementById('pStartDate').value;
   const endDate = document.getElementById('pEndDate').value;
+  const cr = parseInt(document.getElementById('pCityRetrySeconds').value, 10);
+  const cityRetrySeconds = Number.isFinite(cr) && cr > 0 ? cr : 30;
 
   if (!startDate || !endDate) {
     showAlert('Select start and end dates.', onDone);
@@ -611,17 +622,17 @@ function buildProfileFromForm(onDone) {
       'Debug port ' + debugPort + ' is already used by ' + otherProfile.username + '. Continue anyway?',
       () => {
         // User confirmed — proceed
-        finishBuildProfile(id, instanceIndex, username, password, securityQuestions, cities, month, year, startDate, endDate, debugPort, onDone);
+        finishBuildProfile(id, instanceIndex, username, password, securityQuestions, cities, startDate, endDate, debugPort, cityRetrySeconds, onDone);
       },
       onDone
     );
     return;
   }
 
-  finishBuildProfile(id, instanceIndex, username, password, securityQuestions, cities, month, year, startDate, endDate, debugPort, onDone);
+  finishBuildProfile(id, instanceIndex, username, password, securityQuestions, cities, startDate, endDate, debugPort, cityRetrySeconds, onDone);
 }
 
-function finishBuildProfile(id, instanceIndex, username, password, securityQuestions, cities, month, year, startDate, endDate, debugPort, onDone) {
+function finishBuildProfile(id, instanceIndex, username, password, securityQuestions, cities, startDate, endDate, debugPort, cityRetrySeconds, onDone) {
   const profile = {
     id: id || undefined,
     instanceIndex,
@@ -630,14 +641,13 @@ function finishBuildProfile(id, instanceIndex, username, password, securityQuest
     securityQuestions,
     appointment: {
       city: cities,
-      month,
-      year,
       startDate,
       endDate,
       preferredTime: document.getElementById('pPreferredTime').value.trim() || null
     },
     chromeRemoteDebugPort: debugPort,
-    chromeUserDataDir: document.getElementById('pUserDataDir').value.trim()
+    chromeUserDataDir: document.getElementById('pUserDataDir').value.trim(),
+    cityRetrySeconds
   };
 
   onDone(profile);
@@ -740,7 +750,7 @@ function renderEditList() {
       <div class="edit-list-row">
         <div class="edit-list-info">
           <div class="edit-list-user">${p.username || 'Unknown'}</div>
-          <div class="edit-list-detail">${cities} &bull; ${a.month || ''} ${a.year || ''} &bull; Port ${p.chromeRemoteDebugPort || ''} &bull; <b>${status}</b></div>
+          <div class="edit-list-detail">${cities} &bull; Port ${p.chromeRemoteDebugPort || ''} &bull; <b>${status}</b></div>
         </div>
         <div class="edit-list-actions">
           <button class="small" onclick="window.editProfile('${p.id}')">Edit</button>
@@ -913,9 +923,10 @@ async function refreshRunningStatuses() {
     let changed = false;
     for (const np of data.profiles) {
       const existing = appState.profiles.find((p) => p.id === np.id);
-      if (existing && (existing.status !== np.status || existing.running !== np.running)) {
+      if (existing && (existing.status !== np.status || existing.running !== np.running || existing.chromeConnected !== np.chromeConnected)) {
         existing.status = np.status;
         existing.running = np.running;
+        existing.chromeConnected = np.chromeConnected;
         changed = true;
       }
     }
@@ -929,6 +940,7 @@ window.editProfile = (id) => { closeEditList(); openModal(appState.profiles.find
 window.startProfile = startProfile;
 window.stopProfile = stopProfile;
 window.connectChrome = connectChrome;
+window.showChrome = showChrome;
 window.rotateIP = rotateIP;
 window.askDeleteProfile = askDeleteProfile;
 

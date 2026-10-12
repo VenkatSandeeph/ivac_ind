@@ -602,11 +602,6 @@ export async function submitAppointment(
     }).catch(() => null);
   }
 
-  if (config?.dryRun) {
-    info('DRY RUN: skipping submit button click.');
-    return true;
-  }
-
   // ---- CLICK NOW. All logging and supabase are deferred until AFTER the click is fired. ----
   const preClickUrl = page.url();
   const submitStart = Date.now();

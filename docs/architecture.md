@@ -84,7 +84,7 @@ sequenceDiagram
                     E->>W: calMonthYear(m,y) → dateClick(iso)
                     W-->>S: get-family-ofc-schedule-entries
                     S-->>E: intercepted response (ScheduleEntries)
-                    E->>W: timeAndSubmit(preferredTime, dryRun)
+                    E->>W: timeAndSubmit(preferredTime)
                     E->>W: SUBMIT_RESULT → booked/taken/left/unknown
                     E->>T: sendOfcBooked (fire-and-forget)
                 else no dates

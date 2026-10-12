@@ -112,30 +112,6 @@
 
         <div class="row two-cols">
           <div>
-            <label>Preferred Month</label>
-            <select id="pMonth">
-              <option value="Jan">Jan</option>
-              <option value="Feb">Feb</option>
-              <option value="Mar">Mar</option>
-              <option value="Apr">Apr</option>
-              <option value="May">May</option>
-              <option value="Jun">Jun</option>
-              <option value="Jul">Jul</option>
-              <option value="Aug">Aug</option>
-              <option value="Sep" selected>Sep</option>
-              <option value="Oct">Oct</option>
-              <option value="Nov">Nov</option>
-              <option value="Dec">Dec</option>
-            </select>
-          </div>
-          <div>
-            <label>Preferred Year</label>
-            <input id="pYear" type="number" min="2024" max="2035" value="2026" />
-          </div>
-        </div>
-
-        <div class="row two-cols">
-          <div>
             <label>Start Date</label>
             <input id="pStartDate" type="date" />
           </div>
@@ -147,6 +123,9 @@
 
         <label>Preferred Time (optional)</label>
         <input id="pPreferredTime" type="text" placeholder="e.g. 10:00 AM" />
+
+        <label>City Retry Timer (seconds)</label>
+        <input id="pCityRetrySeconds" type="number" min="1" value="30" />
 
         <div class="row two-cols">
           <div>

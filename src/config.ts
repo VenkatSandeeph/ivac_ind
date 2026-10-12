@@ -52,7 +52,6 @@ export type AutomationConfig = {
   headless: boolean;
   alertOnMajorEvents: boolean;
   screenshotAfterSelection: boolean;
-  dryRun: boolean;
   uiApiMismatchRetries: number;
   uiApiMismatchRetryDelayMs: number;
   maxDateAttempts: number;
@@ -70,7 +69,8 @@ export type ProfileConfig = {
   username: string;
   password: string;
   securityQuestions: SecurityQuestionConfig[];
-  appointment: AppointmentConfig;
+  // month/year optional — derived from startDate during merge when absent
+  appointment: Partial<AppointmentConfig>;
   authUrl?: string;
   scheduleUrl?: string;
   chromeExecutable?: string;
@@ -86,7 +86,6 @@ export type ProfileConfig = {
   headless?: boolean;
   alertOnMajorEvents?: boolean;
   screenshotAfterSelection?: boolean;
-  dryRun?: boolean;
   uiApiMismatchRetries?: number;
   uiApiMismatchRetryDelayMs?: number;
   maxDateAttempts?: number;
@@ -112,7 +111,6 @@ export type SettingsConfig = {
   headless: boolean;
   alertOnMajorEvents: boolean;
   screenshotAfterSelection: boolean;
-  dryRun: boolean;
   uiApiMismatchRetries: number;
   uiApiMismatchRetryDelayMs: number;
   maxDateAttempts: number;
@@ -291,8 +289,6 @@ function resolveProfile(raw: unknown, profileId: string | null): { settings: Par
     securityQuestions: Array.isArray(legacy.securityQuestions) ? legacy.securityQuestions : [],
     appointment: legacy.appointment || {
       city: '',
-      month: '',
-      year: 0,
       startDate: '',
       endDate: '',
       preferredTime: null
@@ -316,14 +312,21 @@ function resolveProfile(raw: unknown, profileId: string | null): { settings: Par
 function mergeWithDefaults(settings: Partial<SettingsConfig>, profile: ProfileConfig): AutomationConfig {
   const env = process.env;
 
+  const startDate = profile.appointment?.startDate || env.APPOINTMENT_START_DATE || '';
+  const endDate = profile.appointment?.endDate || env.APPOINTMENT_END_DATE || '';
+  // month/year were removed from the profile editor — still needed
+  // internally as the calendar-jump fallback, so derive from startDate
+  // when not explicitly set in the profile JSON or env. Parse the ISO
+  // string directly — new Date('YYYY-MM-DD') is UTC midnight and can
+  // roll the month back one day west of UTC.
+  const startParts = /^(\d{4})-(\d{2})-\d{2}/.exec(startDate);
+  const derived = startParts ? { month: Number(startParts[2]), year: Number(startParts[1]) } : null;
   const appointment: AppointmentConfig = {
     city: parseCityList(profile.appointment?.city ?? env.APPOINTMENT_CITY ?? 'Unknown City'),
-    month: parseMonth(profile.appointment?.month ?? env.APPOINTMENT_MONTH ?? ''),
-    year: parseNumber(profile.appointment?.year ?? env.APPOINTMENT_YEAR, 0),
-    startDate:
-      profile.appointment?.startDate || env.APPOINTMENT_START_DATE || '',
-    endDate:
-      profile.appointment?.endDate || env.APPOINTMENT_END_DATE || '',
+    month: parseMonth(profile.appointment?.month ?? env.APPOINTMENT_MONTH ?? (derived ? derived.month : '')),
+    year: parseNumber(profile.appointment?.year ?? env.APPOINTMENT_YEAR, derived ? derived.year : 0),
+    startDate,
+    endDate,
     preferredTime:
       profile.appointment?.preferredTime ?? env.APPOINTMENT_PREFERRED_TIME ?? null
   };
@@ -367,8 +370,6 @@ function mergeWithDefaults(settings: Partial<SettingsConfig>, profile: ProfileCo
       parseBoolean(profile.alertOnMajorEvents ?? settings.alertOnMajorEvents ?? env.ALERT_ON_MAJOR_EVENTS, true),
     screenshotAfterSelection:
       parseBoolean(profile.screenshotAfterSelection ?? settings.screenshotAfterSelection ?? env.SCREENSHOT_AFTER_SELECTION, true),
-    dryRun:
-      parseBoolean(profile.dryRun ?? settings.dryRun ?? env.DRY_RUN, true),
     uiApiMismatchRetries:
       parseNumber(profile.uiApiMismatchRetries ?? settings.uiApiMismatchRetries ?? env.UI_API_MISMATCH_RETRIES, 2),
     uiApiMismatchRetryDelayMs:
