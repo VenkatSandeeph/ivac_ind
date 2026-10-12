@@ -67,6 +67,16 @@ Theory: bots concentrate on the earliest available date, so the 2nd-earliest see
 
 **Experiment logs** (`src/date-experiment.ts` → `logs/date-experiment.jsonl`, fire-and-forget, serialized write queue): `decision` events record every ordering choice — `dates`, `gapWorkingDays`, `enabled`, `wouldReorder` (baseline: fires even when the toggle is OFF, so you can see how often the rule *would* have applied), `reordered`, `order`. `outcome` events per attempted date: `pos` (position in attempt order), `promoted` (tried-first 2nd date), `result` (`booked`/`booked_retry`/`slot_gone`/`throttled`/`no_entries`/`no_eligible`/`submit_error`/`error`/`hard_error`). Join on `runId`+`attempt` (dom) or `postId`+timestamp (fast). Analysis: `findstr "promoted\":true" logs\date-experiment.jsonl` → compare booked-rate of promoted vs non-promoted attempts.
 
+### Per-profile City Selection Log
+
+`src/city-selection-log.ts` appends one line per OFC city selection to `logs/ofc-city-selections-<profile>.txt` (append-only, survives restarts):
+
+```
+[2026-10-12] [14:23:41] Selected NEW DELHI VAC | Calendar Visible: true
+```
+
+Called from `logCitySelected` in `src/index.ts` — the choke point all OFC selectCity + schedule-response sites use (consular stage does not write this file). Fire-and-forget with a serialized write queue — never blocks the booking loop. Filename is `config.username` sanitized (`[^\w.-]` → `-`); profiles sharing a username share one file.
+
 ### Special Windows (slot-drop timing)
 
 `SPECIAL_WINDOW_TRIGGERS_SEC` in `src/index.ts` — observed slot-drop trigger times at **second :58** of minutes **12, 25, 29, 36, 49, 55, 59**, every hour, on the **local system clock** (fires when the machine's time hits `HH:MM:58`; NOT server UTC).

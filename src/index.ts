@@ -53,6 +53,7 @@ import {
 } from './static-proxy';
 import { setupApiResponseCapture, runDirectOfcFlow, resetCapturedScheduleData, getMemberQueryResult, resetMemberQueryResult, consumeLateEntriesRescue, orderDatesForAttempt, type DirectApiResult } from './api-direct';
 import { recordDateExperiment } from './date-experiment'; // EXPERIMENTAL: avoidEarliestDate
+import { recordCitySelection } from './city-selection-log';
 import { playBeep } from './beep';
 import { recordSlotObservation } from './slot-tracker';
 
@@ -200,8 +201,10 @@ function abortSpecialSweep(reason: string): void {
  * — the same signal the flow uses downstream. Emitted after every
  * selectCity + schedule-response pair, including retries.
  */
-function logCitySelected(city: string, scheduleResult: { available?: boolean } | null | undefined): void {
-  client('🏙️', `Selected ${city} | Calendar Visible: ${!!scheduleResult?.available}`);
+function logCitySelected(city: string, scheduleResult: { available?: boolean } | null | undefined, profile: string): void {
+  const visible = !!scheduleResult?.available;
+  client('🏙️', `Selected ${city} | Calendar Visible: ${visible}`);
+  recordCitySelection(profile, city, visible); // append-only per-profile file
 }
 
 /**
@@ -1596,7 +1599,7 @@ async function main() {
         resetCapturedScheduleData();
         await selectCity(page, currentCity, true, config);
         scheduleResult = await scheduleResponsePromise;
-        logCitySelected(currentCity, scheduleResult);
+        logCitySelected(currentCity, scheduleResult, config.username);
         noSlots = await detectNoSlots(page);
       }
     } else {
@@ -1649,7 +1652,7 @@ async function main() {
       if (!memberMissing) {
         await selectCity(page, currentCity, true, config);
         scheduleResult = await scheduleResponsePromise;
-        logCitySelected(currentCity, scheduleResult);
+        logCitySelected(currentCity, scheduleResult, config.username);
         noSlots = await detectNoSlots(page);
       }
 
@@ -2271,7 +2274,7 @@ async function main() {
           resetCapturedScheduleData();
           await selectCity(page, currentCity, true, config);
           scheduleResult = await scheduleResponsePromise;
-          logCitySelected(currentCity, scheduleResult);
+          logCitySelected(currentCity, scheduleResult, config.username);
           noSlots = await detectNoSlots(page);
 
           try {
@@ -2430,7 +2433,7 @@ async function main() {
             const cal = await page.locator('#datepicker, .ui-datepicker').count().then(c => c > 0).catch(() => false);
             if (cal) {
               info('Recovery: calendar is visible after reselection');
-              logCitySelected(currentCity, { available: true });
+              logCitySelected(currentCity, { available: true }, config.username);
               recovered = true;
               break;
             }
@@ -2448,7 +2451,7 @@ async function main() {
             const cal2 = await page.locator('#datepicker, .ui-datepicker').count().then(c => c > 0).catch(() => false);
             if (cal2) {
               info('Recovery: calendar visible after navigation');
-              logCitySelected(currentCity, { available: true });
+              logCitySelected(currentCity, { available: true }, config.username);
               recovered = true;
               break;
             }
@@ -2564,7 +2567,7 @@ async function main() {
             const schedRespPromise = waitForScheduleResponse(page, scheduleWaitMs(), tryPostId || undefined);
             await selectCity(page, tryCity, true, config);
             const tryResult = await schedRespPromise;
-            logCitySelected(tryCity, tryResult);
+            logCitySelected(tryCity, tryResult, config.username);
 
             const tryApiDate = extractEarliestApiDate(tryResult, config.appointment.startDate, config.appointment.endDate);
             if (tryApiDate) {
