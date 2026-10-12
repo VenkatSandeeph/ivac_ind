@@ -1309,7 +1309,8 @@ async function submitViaPageFunction(
         if (parsed.HasError && !parsed.AllScheduled) {
           const errMsg = parsed.Errors?.m_StringValue || 'unknown error';
           warn(`[FAST FLOW] Phase 3: submit FAILED — ${errMsg}`);
-          client('❌', `Submit failed: ${errMsg}`);
+          // Client log = verdict only; the raw server message stays in warn().
+          client('❌', 'Submit failed — checking for another slot…');
           // 'slot_gone' = the slot was taken by someone else between our
           // entries read and our submit. The date may still have inventory —
           // the caller retries on the page's post-failure entries refresh.

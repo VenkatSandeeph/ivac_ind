@@ -200,6 +200,9 @@ export async function runConsularSchedule(page: Page, config: AutomationConfig):
 
     try {
       await selectCity(page, cityToSelect, appointmentCities.length > 1, config);
+      // Same client-facing selection line as the OFC stage — verdict is the
+      // API days count captured during the select (0 = no calendar dates).
+      client('🏙️', `Selected ${cityToSelect} | Calendar Visible: ${lastConsularScheduleDaysCount > 0}`);
     } catch (err) {
       warn('Consular stage: selectCity failed', err);
       if (attempt < maxAttempts) {

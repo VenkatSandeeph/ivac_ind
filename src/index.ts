@@ -194,6 +194,17 @@ function abortSpecialSweep(reason: string): void {
 }
 
 /**
+ * THE client-facing city-selection line — one clean verdict per selection:
+ *   🏙️ [HH:mm:ss] Selected NEW DELHI VAC | Calendar Visible: true
+ * `available` comes from the schedule-API response (days or entries present)
+ * — the same signal the flow uses downstream. Emitted after every
+ * selectCity + schedule-response pair, including retries.
+ */
+function logCitySelected(city: string, scheduleResult: { available?: boolean } | null | undefined): void {
+  client('🏙️', `Selected ${city} | Calendar Visible: ${!!scheduleResult?.available}`);
+}
+
+/**
  * Block-page recovery:
  * - rate_limited (CF 1015 / "rate limited"): transient edge throttle — back off
  *   and reload; NO rotation (the IP isn't banned, just warm).
@@ -1585,6 +1596,7 @@ async function main() {
         resetCapturedScheduleData();
         await selectCity(page, currentCity, true, config);
         scheduleResult = await scheduleResponsePromise;
+        logCitySelected(currentCity, scheduleResult);
         noSlots = await detectNoSlots(page);
       }
     } else {
@@ -1637,6 +1649,7 @@ async function main() {
       if (!memberMissing) {
         await selectCity(page, currentCity, true, config);
         scheduleResult = await scheduleResponsePromise;
+        logCitySelected(currentCity, scheduleResult);
         noSlots = await detectNoSlots(page);
       }
 
@@ -2258,6 +2271,7 @@ async function main() {
           resetCapturedScheduleData();
           await selectCity(page, currentCity, true, config);
           scheduleResult = await scheduleResponsePromise;
+          logCitySelected(currentCity, scheduleResult);
           noSlots = await detectNoSlots(page);
 
           try {
@@ -2416,6 +2430,7 @@ async function main() {
             const cal = await page.locator('#datepicker, .ui-datepicker').count().then(c => c > 0).catch(() => false);
             if (cal) {
               info('Recovery: calendar is visible after reselection');
+              logCitySelected(currentCity, { available: true });
               recovered = true;
               break;
             }
@@ -2433,6 +2448,7 @@ async function main() {
             const cal2 = await page.locator('#datepicker, .ui-datepicker').count().then(c => c > 0).catch(() => false);
             if (cal2) {
               info('Recovery: calendar visible after navigation');
+              logCitySelected(currentCity, { available: true });
               recovered = true;
               break;
             }
@@ -2548,6 +2564,7 @@ async function main() {
             const schedRespPromise = waitForScheduleResponse(page, scheduleWaitMs(), tryPostId || undefined);
             await selectCity(page, tryCity, true, config);
             const tryResult = await schedRespPromise;
+            logCitySelected(tryCity, tryResult);
 
             const tryApiDate = extractEarliestApiDate(tryResult, config.appointment.startDate, config.appointment.endDate);
             if (tryApiDate) {

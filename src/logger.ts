@@ -30,6 +30,15 @@ function isClientHidden(text: string): boolean {
   return CLIENT_HIDDEN_PATTERNS.some((p) => lower.includes(p)) || BOT_TOKEN_RE.test(text);
 }
 
+// Machine markers the UI parses out of the core's stdout (ui/main.js):
+// [UI_STATUS] → profile status label, [BROWSER_CLOSED] → banner,
+// [STOPPED] → status. In client mode these MUST keep printing even though
+// all other info/warn lines are suppressed — dropping them breaks the UI.
+const UI_MARKER_RE = /\[(UI_STATUS|BROWSER_CLOSED|STOPPED)\]/;
+function isUiMarker(text: string): boolean {
+  return UI_MARKER_RE.test(text);
+}
+
 // HH:mm:ss local time — prepended to every client-build line so release logs
 // carry real timing detail (when a 403 hit, slot cadence, etc.).
 function ts(): string {
@@ -55,14 +64,17 @@ function format(...args: Array<unknown>) {
 }
 
 /**
- * Info log.
- * Dev mode: [INFO] msg. Client mode: [HH:mm:ss] [INFO] msg — release builds
- * get the same diagnostic detail as dev, minus hidden-service lines.
+ * Info log — developer detail.
+ * Dev mode: [INFO] msg.
+ * Client mode: suppressed — the client log is verdicts only (client() +
+ * error()). The one exception is UI markers ([UI_STATUS]/[BROWSER_CLOSED]/
+ * [STOPPED]) which the Electron UI parses out of the stream.
  */
 export function info(...args: Array<unknown>) {
   const line = format(...args);
   if (isClientMode) {
     if (isClientHidden(line)) return;
+    if (!isUiMarker(line)) return;
     console.log(clientPrefix(levelLabels.info), line);
     return;
   }
@@ -70,13 +82,17 @@ export function info(...args: Array<unknown>) {
 }
 
 /**
- * Warn log.
- * Dev mode: [WARN] msg. Client mode: [HH:mm:ss] [WARN] msg.
+ * Warn log — developer detail.
+ * Dev mode: [WARN] msg.
+ * Client mode: suppressed like info() (UI markers still pass). Callers that
+ * need the user to see a warning must emit a client() verdict line — that is
+ * the existing convention ("client() = user-facing, warn() = diagnostics").
  */
 export function warn(...args: Array<unknown>) {
   const line = format(...args);
   if (isClientMode) {
     if (isClientHidden(line)) return;
+    if (!isUiMarker(line)) return;
     console.warn(clientPrefix(levelLabels.warn), line);
     return;
   }
@@ -145,9 +161,9 @@ export function client(emoji: string, ...args: Array<unknown>) {
  *
  *   [WARN] [BACKEND_ERROR] route | http=403 | code=SGA14 | detail
  *
- * Dev mode gets the full detail line; client mode shows the same line
- * (timestamped). Callers should also emit a client() line with a
- * user-friendly explanation + the action being taken.
+ * Dev mode gets the full detail line; client mode suppresses it (warn() is
+ * dev-only there) — so callers MUST also emit a client() verdict line with
+ * a user-friendly explanation + the action being taken.
  */
 export function backendError(
   source: string,
