@@ -59,7 +59,11 @@ Observed during a slot drop (NEW DELHI, :56 window): the days call took 21s unde
 - **Hard boundary** — `postId` is per-city; the capture dies at the next `selectCity`. `resetCapturedScheduleData()` (called before every city selection) clears `lateEntriesRescue`, so nothing can ever be submitted against the next city's context. Rescue is single-shot per city.
 - **Special-window waits do NOT arm the rescue** — `preciseSleepUntilSpecialWindow` must fire selection exactly on the trigger; a rescue submit mid-window would risk missing it.
 
-**Lessons learned:** the page auto-refreshes entries after a failed submit (a stale-token assumption was wrong); submit failures are contention losses, not bugs — act on the error response, don't shorten the success timeout; wire replay must never run against a session with submits in flight; a captured-but-unconsumed response is a wasted slot — listen during dead time, and discard the capture the instant the city context dies. the page auto-refreshes entries after a failed submit (a stale-token assumption was wrong); submit failures are contention losses, not bugs — act on the error response, don't shorten the success timeout; wire replay must never run against a session with submits in flight.
+**Lessons learned:** the page auto-refreshes entries after a failed submit (a stale-token assumption was wrong); submit failures are contention losses, not bugs — act on the error response, don't shorten the success timeout; wire replay must never run against a session with submits in flight; a captured-but-unconsumed response is a wasted slot — listen during dead time, and discard the capture the instant the city context dies.
+
+### EXPERIMENTAL: avoidEarliestDate ("2nd Date" header toggle)
+
+Theory: bots concentrate on the earliest available date, so the 2nd-earliest sees less submit contention. When ON (`settings.avoidEarliestDate`, per-profile override supported) and ≥2 in-range dates exist with the 2nd within **7 working days** of the earliest, the attempt order becomes `[2nd, 1st, 3rd, ...]` — the earliest stays the immediate fallback in the same attempt (reorder, never skip). Applied at one seam — `orderDatesForAttempt` in `src/api-direct.ts` — used by the fast flow (`matchingDates`) and the DOM path (`candidateDates`, both call sites). Working days = Mon–Fri only (no holiday calendar). OFC-only; consular keeps earliest-first. All edits are marked `// EXPERIMENTAL`; removal = delete marked blocks + the config key.
 
 ### Special Windows (slot-drop timing)
 

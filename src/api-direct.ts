@@ -697,6 +697,60 @@ function sortScheduleEntries(entries: ScheduleEntry[], preferredTime?: string | 
 }
 
 // =============================================================================
+// EXPERIMENTAL: avoidEarliestDate — 2nd-date-first ordering
+// -----------------------------------------------------------------------------
+// Theory: bots/humans concentrate on the earliest available date, so the
+// 2nd-earliest date sees less submit contention. When ≥2 in-range dates exist
+// and the 2nd is within AVOID_EARLIEST_WINDOW_DAYS working days of the
+// earliest, try the 2nd FIRST while keeping the earliest as the immediate
+// fallback in the same attempt (reorder, never skip — a failed 2nd date still
+// falls through to the earliest before the next city).
+// To remove: delete this block, the orderDatesForAttempt call sites, and the
+// avoidEarliestDate plumbing (config.ts, ui/, config.example.json).
+// =============================================================================
+
+const AVOID_EARLIEST_WINDOW_DAYS = 7;
+
+/**
+ * Count Mon–Fri days strictly after `a` up to and including `b`.
+ * Dates are ISO 'YYYY-MM-DD' (compared lexically before parsing).
+ */
+function workingDaysBetween(a: string, b: string): number {
+  if (b <= a) return 0;
+  const start = new Date(a + 'T00:00:00');
+  const end = new Date(b + 'T00:00:00');
+  if (isNaN(start.getTime()) || isNaN(end.getTime())) return 0;
+  // Simple loop — only small gaps matter (early exit past the window).
+  let count = 0;
+  const cursor = new Date(start);
+  while (cursor < end) {
+    cursor.setDate(cursor.getDate() + 1);
+    const dow = cursor.getDay(); // 0=Sun .. 6=Sat
+    if (dow >= 1 && dow <= 5) count++;
+    if (count > AVOID_EARLIEST_WINDOW_DAYS) break;
+  }
+  return count;
+}
+
+/**
+ * Attempt order for candidate dates. When enabled and the 2nd date is within
+ * the working-day window of the earliest, returns [2nd, 1st, 3rd, ...] —
+ * the earliest remains the immediate fallback in the same attempt.
+ * Otherwise returns the input unchanged.
+ */
+export function orderDatesForAttempt<T>(
+  items: T[],
+  dateOf: (item: T) => string,
+  enabled: boolean
+): T[] {
+  if (!enabled || items.length < 2) return items;
+  const gap = workingDaysBetween(dateOf(items[0]), dateOf(items[1]));
+  if (gap === 0 || gap > AVOID_EARLIEST_WINDOW_DAYS) return items;
+  info(`[EXPERIMENTAL] avoidEarliestDate: 2nd date ${dateOf(items[1])} is ${gap} working day(s) after ${dateOf(items[0])} — trying it first (earliest remains fallback)`);
+  return [items[1], items[0], ...items.slice(2)];
+}
+
+// =============================================================================
 // Phase 2: Date click — triggers page's getScheduleEntries
 // =============================================================================
 
@@ -1606,7 +1660,13 @@ export async function runDirectOfcFlow(page: Page, config: AutomationConfig): Pr
     return { success: false, fallback: false, reason: 'no_slots' };
   }
 
-  const matchingDates = filterScheduleDays(capturedScheduleDays, config);
+  // EXPERIMENTAL: avoidEarliestDate — reorder [2nd, 1st, ...] when the 2nd
+  // date is within the working-day window. No-op when disabled/one date.
+  const matchingDates = orderDatesForAttempt(
+    filterScheduleDays(capturedScheduleDays, config),
+    d => d.Date.substring(0, 10),
+    config.avoidEarliestDate
+  );
   if (matchingDates.length === 0) {
     info('[FAST FLOW] No dates matching configured range');
     return { success: false, fallback: false, reason: 'no_dates_in_range' };

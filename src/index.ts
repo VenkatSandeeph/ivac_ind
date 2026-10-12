@@ -51,7 +51,7 @@ import {
   STATIC_ROTATE_FLAG,
   type StaticProxyRelay
 } from './static-proxy';
-import { setupApiResponseCapture, runDirectOfcFlow, resetCapturedScheduleData, getMemberQueryResult, resetMemberQueryResult, consumeLateEntriesRescue, type DirectApiResult } from './api-direct';
+import { setupApiResponseCapture, runDirectOfcFlow, resetCapturedScheduleData, getMemberQueryResult, resetMemberQueryResult, consumeLateEntriesRescue, orderDatesForAttempt, type DirectApiResult } from './api-direct';
 import { playBeep } from './beep';
 import { recordSlotObservation } from './slot-tracker';
 
@@ -2477,7 +2477,9 @@ async function main() {
           config.appointment.endDate,
           []
         );
-        candidateDates = inRange;
+        // EXPERIMENTAL: avoidEarliestDate — same 2nd-first reorder as the
+        // fast flow so DOM fallback doesn't silently switch strategy.
+        candidateDates = orderDatesForAttempt(inRange, c => c.date, config.avoidEarliestDate);
 
         // Log all available dates to client (even if not in range)
         const allDates = allAvailable.map(d => d.date);
@@ -2560,7 +2562,8 @@ async function main() {
                 config.appointment.endDate,
                 []
               );
-              candidateDates = inRange;
+              // EXPERIMENTAL: avoidEarliestDate — same reorder as fast flow.
+              candidateDates = orderDatesForAttempt(inRange, c => c.date, config.avoidEarliestDate);
               // Log all available dates to client (even if not in range)
               const tryAllDates = allAvailable.map(d => d.date);
               const tryInRangeDates = inRange.map(d => d.date);

@@ -56,6 +56,7 @@ export type AutomationConfig = {
   uiApiMismatchRetryDelayMs: number;
   maxDateAttempts: number;
   preferLeastSlots: boolean;
+  avoidEarliestDate: boolean;   // EXPERIMENTAL: 2nd-date-first ordering
   autoRotateIp: boolean;
   ipMode: IpMode;
   specialWindowOnly: boolean;
@@ -90,6 +91,7 @@ export type ProfileConfig = {
   uiApiMismatchRetryDelayMs?: number;
   maxDateAttempts?: number;
   preferLeastSlots?: boolean;
+  avoidEarliestDate?: boolean;  // EXPERIMENTAL
   autoRotateIp?: boolean;
   ipMode?: IpMode;
   specialWindowOnly?: boolean;
@@ -115,6 +117,7 @@ export type SettingsConfig = {
   uiApiMismatchRetryDelayMs: number;
   maxDateAttempts: number;
   preferLeastSlots: boolean;
+  avoidEarliestDate: boolean;   // EXPERIMENTAL
   autoRotateIp: boolean;
   ipMode: IpMode;
   specialWindowOnly: boolean;
@@ -378,6 +381,9 @@ function mergeWithDefaults(settings: Partial<SettingsConfig>, profile: ProfileCo
       parseNumber(profile.maxDateAttempts ?? settings.maxDateAttempts ?? env.MAX_DATE_ATTEMPTS, 3),
     preferLeastSlots:
       parseBoolean(profile.preferLeastSlots ?? settings.preferLeastSlots ?? env.PREFER_LEAST_SLOTS, false),
+    // EXPERIMENTAL: avoidEarliestDate — header "2nd Date" toggle.
+    avoidEarliestDate:
+      parseBoolean(profile.avoidEarliestDate ?? settings.avoidEarliestDate ?? env.AVOID_EARLIEST_DATE, false),
     // autoRotateIp is kept for backward compatibility and now means "rotation
     // is allowed" — derived from ipMode ('none' = never rotate).
     autoRotateIp: ipMode !== 'none',

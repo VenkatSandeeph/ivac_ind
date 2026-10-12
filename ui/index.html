@@ -44,6 +44,10 @@
         <label class="header-check" id="specialWindowLabel" title="When checked, profiles run only during :20–:30 and :50–:00 system-clock windows each hour and freeze between them. Applies live to running profiles.">
           <input type="checkbox" id="specialWindowChk" /> Special Window
         </label>
+        <!-- EXPERIMENTAL: avoidEarliestDate — remove label + renderer/main wiring to drop the feature -->
+        <label class="header-check" id="secondDateLabel" title="EXPERIMENTAL — When checked and 2+ dates are in range, tries the 2nd-earliest date first if it falls within 7 working days of the earliest (earliest stays as fallback in the same attempt). Dodges first-date bot contention. Applies on next profile start.">
+          <input type="checkbox" id="secondDateChk" /> 2nd Date
+        </label>
         <button id="rotateIpBtn" class="rotate-ip-header-btn">
           <span class="rotate-ip-label">Rotate IP</span>
           <span class="rotate-ip-subtext" id="currentIpDisplay">—</span>

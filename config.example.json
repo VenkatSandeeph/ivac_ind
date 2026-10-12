@@ -36,5 +36,6 @@
   "screenshotAfterSelection": true,
   "cityRetrySeconds": 10,
   "preferLeastSlots": false,
+  "avoidEarliestDate": false,
   "autoRotateIp": true
 }

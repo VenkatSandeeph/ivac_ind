@@ -109,6 +109,7 @@ function getDefaultConfig() {
       uiApiMismatchRetryDelayMs: 1000,
       maxDateAttempts: 3,
       preferLeastSlots: false,
+      avoidEarliestDate: false,   // EXPERIMENTAL: 2nd-date-first ordering
       autoRotateIp: true,
       ipMode: 'auto',
       nordvpn: {
@@ -769,6 +770,10 @@ const apiServer = http.createServer(async (req, res) => {
     cfg.settings = cfg.settings || {};
     if (typeof body.preferLeastSlots === 'boolean') {
       cfg.settings.preferLeastSlots = body.preferLeastSlots;
+    }
+    // EXPERIMENTAL: avoidEarliestDate — header "2nd Date" toggle.
+    if (typeof body.avoidEarliestDate === 'boolean') {
+      cfg.settings.avoidEarliestDate = body.avoidEarliestDate;
     }
     if (typeof body.autoRotateIp === 'boolean') {
       cfg.settings.autoRotateIp = body.autoRotateIp;

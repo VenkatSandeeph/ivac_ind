@@ -247,6 +247,12 @@ async function loadProfiles() {
       swChk.checked = !!appState.settings.specialWindowOnly;
     }
 
+    // EXPERIMENTAL: avoidEarliestDate — sync header "2nd Date" checkbox
+    const sdChk = document.getElementById('secondDateChk');
+    if (sdChk && !appState.secondDateSaving) {
+      sdChk.checked = !!appState.settings.avoidEarliestDate;
+    }
+
     if (appState.profiles.length > 0 && !appState.selectedProfileId) {
       appState.selectedProfileId = appState.profiles[0].id;
     }
@@ -907,6 +913,30 @@ document.addEventListener('DOMContentLoaded', async () => {
       appState.settings.specialWindowOnly = !checked;
     } finally {
       appState.specialWindowSaving = false;
+    }
+  });
+
+  // EXPERIMENTAL: avoidEarliestDate — header "2nd Date" checkbox, persisted
+  // in settings, applied on next profile start (cores read config at spawn).
+  document.getElementById('secondDateChk')?.addEventListener('change', async (e) => {
+    const checked = !!e.target.checked;
+    appState.secondDateSaving = true;
+    appState.settings.avoidEarliestDate = checked;
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ avoidEarliestDate: checked })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) throw new Error(data.msg || 'save failed');
+      debugLog('avoidEarliestDate saved: ' + checked);
+    } catch (err) {
+      console.error('Failed to save avoidEarliestDate:', err);
+      e.target.checked = !checked;
+      appState.settings.avoidEarliestDate = !checked;
+    } finally {
+      appState.secondDateSaving = false;
     }
   });
 });
