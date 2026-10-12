@@ -826,7 +826,16 @@ async function clickDateAndGetEntries(
     { timeout: 8000 }
   ).catch(() => null);
 
-  const captured = await waitForCapturedEntries(8000);
+  let captured = await waitForCapturedEntries(8000);
+
+  // Busy-page extension: right after a failed submit the site is usually
+  // mid auto-resubmit — clicks land on a busy page and the entries call
+  // takes longer than 8s. Don't write the date off while submits fly.
+  if (!captured && pendingOfcSubmits > 0) {
+    info('[FAST FLOW] Phase 2: entries wait expired with submits in flight — page busy, extending wait');
+    await waitForSubmitQuiesce(6000);
+    captured = await waitForCapturedEntries(4000);
+  }
 
   if (!captured) {
     // Try the response promise as backup
@@ -902,7 +911,7 @@ async function submitViaPageFunction(
   entry: ScheduleEntry,
   _token: string,
   opts?: { responseTimeoutMs?: number }
-): Promise<{ success: boolean; error?: string; code?: 'slot_gone'; redirectStub?: string }> {
+): Promise<{ success: boolean; error?: string; code?: 'slot_gone' | 'throttled'; redirectStub?: string }> {
   const submitStart = Date.now();
   const responseTimeoutMs = opts?.responseTimeoutMs ?? 30000;
 
@@ -1083,7 +1092,27 @@ async function submitViaPageFunction(
   info(`[FAST FLOW] Phase 3: submit clicked, radio+submit total=${Date.now() - submitStart}ms, waiting for response...`);
 
   // ── Step 5: Wait for response ──
-  const submitResponse = await submitResponsePromise;
+  let submitResponse = await submitResponsePromise;
+
+  // Late-response rescue: a saturated server can answer just past our cap
+  // (observed: response landing ~2s after a 30s wait). If the submit is
+  // still in flight, grant a short grace window instead of abandoning a
+  // live request — abandoning then racing it (wire/DOM retry) is worse.
+  if (!submitResponse && pendingOfcSubmits > 0) {
+    info('[FAST FLOW] Phase 3: response wait expired but submit still in flight — waiting up to 10s more...');
+    submitResponse = await page.waitForResponse(
+      (resp: any) => {
+        try {
+          return resp.request().method() === 'POST'
+            && resp.url().includes('appointments-for-family');
+        } catch { return false; }
+      },
+      { timeout: 10000 }
+    ).catch(() => null);
+    if (submitResponse) {
+      info(`[FAST FLOW] Phase 3: late response captured (${Date.now() - submitStart}ms) — parsing it`);
+    }
+  }
 
   if (submitResponse) {
     try {
@@ -1112,7 +1141,12 @@ async function submitViaPageFunction(
           // 'slot_gone' = the slot was taken by someone else between our
           // entries read and our submit. The date may still have inventory —
           // the caller retries on the page's post-failure entries refresh.
-          const code = /no longer available/i.test(errMsg) ? 'slot_gone' as const : undefined;
+          // 'throttled' = app-level load shedding ("processing too many
+          // requests"). The slot often survives for minutes — the caller
+          // cools off and retries the same date.
+          const code = /no longer available/i.test(errMsg)
+            ? 'slot_gone' as const
+            : /too many requests/i.test(errMsg) ? 'throttled' as const : undefined;
           return { success: false, error: errMsg, code };
         }
         if (parsed.AllScheduled) {
@@ -1166,7 +1200,7 @@ async function submitViaPageFunction(
 // ORDER: runs AFTER the DOM fast-flow (proven click submit) as a backup when
 // the DOM path exhausts all dates. REMOVAL: set EXP_WIRE_SUBMIT = false —
 // the DOM fast-flow is untouched either way.
-const EXP_WIRE_SUBMIT = true;
+const EXP_WIRE_SUBMIT = false;
 const EXP_WIRE_MAX_SUBMITS_PER_DATE = 5;
 
 type WireEntriesResult = {
@@ -1575,27 +1609,51 @@ export async function runDirectOfcFlow(page: Page, config: AutomationConfig): Pr
     // Submit failed — move to next date (don't try more slots on this date)
     warn(`[FAST FLOW] Submit failed for '${entry.Time}' on ${dateStr10}: ${result.error || 'unknown'}`);
 
-    // ── Same-date retry on 'slot_gone' ──────────────────────────────────
+    // ── Same-date retry on 'slot_gone' / 'throttled' ─────────────────────
     // Verified site behavior: after a failed submit the page itself fires
     // a fresh getScheduleEntries (fresh slots + fresh token) plus its own
     // auto-resubmit of the dead slot. Wait for that resubmit to drain,
-    // grab the fresh capture, and take ONE shot at a different remaining
-    // slot on this date before moving on.
-    if (result.code === 'slot_gone') {
+    // grab the fresh capture, and take ONE more shot at a remaining slot
+    // on this date before moving on.
+    //
+    // 'throttled' differs: the rejection was load, not loss — the SAME
+    // slot often stays listed for minutes, so it stays eligible, and we
+    // cool off 20-30s first (the endpoint is shedding requests).
+    if (result.code === 'slot_gone' || result.code === 'throttled') {
       const genBefore = entriesCaptureGen;
       const drained = await waitForSubmitQuiesce(8000);
       if (!drained) warn('[FAST FLOW] submits still in flight after 8s — retrying anyway');
+
+      // The page's OWN auto-resubmit may have landed the booking while we
+      // waited — if we reached the consular page, count it as success.
+      const postQuiesceUrl = page.url();
+      if (postQuiesceUrl.includes('/schedule') && !postQuiesceUrl.includes('/ofc-schedule')) {
+        info(`[FAST FLOW] Page's own resubmit navigated to ${postQuiesceUrl} during settle — booked`);
+        return confirmBooking({}, date, entry);
+      }
+
+      if (result.code === 'throttled') {
+        const coolMs = 20000 + Math.floor(Math.random() * 10000);
+        info(`[FAST FLOW] Server throttled submit — cooling off ${(coolMs / 1000).toFixed(0)}s before same-date retry`);
+        client('⏱️', `Server busy — retrying ${dateStr10} in ${(coolMs / 1000).toFixed(0)}s…`);
+        await page.waitForTimeout(coolMs);
+      }
+
       const gotFresh = await waitForNextEntriesCapture(genBefore, 5000);
       const snap = gotFresh ? getCapturedEntriesSnapshot() : null;
       const retryCands = snap
         ? sortScheduleEntries(
-            snap.entries.filter(e => e.Num !== entry.Num && e.EntriesAvailable >= memberCount),
+            snap.entries.filter(e =>
+              (result.code === 'throttled' || e.Num !== entry.Num) &&
+              e.EntriesAvailable >= memberCount),
             config.appointment.preferredTime, config.preferLeastSlots)
         : [];
       if (retryCands.length > 0) {
         const next = retryCands[0];
         info(`[FAST FLOW] Post-failure refresh: ${retryCands.length} slot(s) remain on ${dateStr10} — retrying '${next.Time}' (Num=${next.Num}, avail=${next.EntriesAvailable})`);
-        client('🔁', `Slot taken — retrying ${dateStr10} at ${next.Time}...`);
+        client('🔁', result.code === 'slot_gone'
+          ? `Slot taken — retrying ${dateStr10} at ${next.Time}…`
+          : `Retrying ${dateStr10} at ${next.Time}…`);
         // Brief settle so the refreshed time table finishes rendering.
         await page.waitForTimeout(600);
         const retryResult = await submitViaPageFunction(page, next, snap!.token, { responseTimeoutMs: 30000 });
@@ -1622,6 +1680,11 @@ export async function runDirectOfcFlow(page: Page, config: AutomationConfig): Pr
     } else if (errStr.includes('429') || errStr.includes('rate_limited')) {
       warn(`[FAST FLOW] Rate limited — waiting 5s before next date`);
       await page.waitForTimeout(5000);
+    } else if (errStr.includes('too many requests')) {
+      // App-level throttle — the submit endpoint is shedding load; the next
+      // date's submit would hit the same wall, so give it breathing room.
+      warn(`[FAST FLOW] Submit throttled — waiting 10s before next date`);
+      await page.waitForTimeout(10000);
     }
 
     // Brief pause between dates (rate-limit avoidance)

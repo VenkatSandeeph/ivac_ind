@@ -1329,7 +1329,12 @@ async function main() {
   let attempt = previousCheckpoint?.attempt ?? 0;
   let booked = false;
   let checkpointFastResumePending = checkpointCanResumeInPlace;
-  let directApiBlocked = false; // session-level: once Cloudflare blocks direct API, don't retry
+  // Attempt-scoped with a 3-strike ceiling: a single congested-window 403
+  // (observed during slot drops) must not kill the fast path for the whole
+  // session. Three CONSECUTIVE blocks → session block; any non-blocked
+  // outcome (success/no_slots/all_exhausted) resets the strike count.
+  let directApiBlocked = false;
+  let directApiBlockStrikes = 0;
 
   if (previousCheckpoint?.city) {
     const cpCity = previousCheckpoint.city.trim().toLowerCase();
@@ -1992,11 +1997,18 @@ async function main() {
       });
 
       if (directResult.fallback === true) {
-        // Only set session-level block for actual Cloudflare blocks (not context extraction failures)
-        // Context extraction failures should retry on next city selection
+        // Only count actual Cloudflare blocks toward the session block —
+        // context-extraction failures retry freely on the next city select.
         if (directResult.reason === 'blocked') {
-          directApiBlocked = true;
-          warn('Direct API blocked by Cloudflare — using DOM flow for remainder of session');
+          directApiBlockStrikes++;
+          if (directApiBlockStrikes >= 3) {
+            directApiBlocked = true;
+            warn('Direct API blocked by Cloudflare 3× consecutively — using DOM flow for remainder of session');
+          } else {
+            warn(`Direct API blocked by Cloudflare (strike ${directApiBlockStrikes}/3) — fast path retries on next attempt`);
+          }
+        } else {
+          directApiBlockStrikes = 0;
         }
         info('Direct API did not succeed — continuing with DOM-based flow');
       } else if (directResult.success) {
@@ -2082,6 +2094,7 @@ async function main() {
         break; // exit main loop
       } else {
         // Direct API completed but no slots/dates — same as DOM flow finding no slots
+        directApiBlockStrikes = 0; // any non-blocked outcome clears the strike count
         info(`Direct API result: ${directResult.reason || 'no success'}`);
 
         // If the fast flow already tried all dates and exhausted them, skip the
