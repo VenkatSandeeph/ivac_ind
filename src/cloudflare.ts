@@ -1,5 +1,5 @@
 import type { Page } from 'patchright';
-import { info, warn } from './logger';
+import { info, warn, uiStatus } from './logger';
 import { isLoginPage } from './utils';
 
 // ---------------------------------------------------------------------------
@@ -190,6 +190,7 @@ export async function waitForHumanVerificationIfNeeded(page: Page, timeoutMs: nu
   }
 
   info('Human verification detected.');
+  uiStatus('Cloudflare verification — waiting');
 
   if (autoSolve) {
     // Phase 1: Wait up to 15s for auto-resolve (patchright + real Chrome often passes without a click)
@@ -200,6 +201,9 @@ export async function waitForHumanVerificationIfNeeded(page: Page, timeoutMs: nu
         return false;
       }
       await page.waitForTimeout(1000);
+      // Heartbeat every ~5s — the UI status only refreshes on new output;
+      // without it the label freezes on whatever ran before this wait.
+      if ((i + 1) % 5 === 0) uiStatus(`Cloudflare verification — auto-resolve ${i + 1}s`);
       if (!(await isHumanVerificationPresent(page))) {
         info('Challenge auto-resolved.');
         return true;
@@ -214,6 +218,7 @@ export async function waitForHumanVerificationIfNeeded(page: Page, timeoutMs: nu
         return false;
       }
       info(`Turnstile click attempt ${attempt}/3`);
+      uiStatus(`Cloudflare verification — solving (attempt ${attempt}/3)`);
       const clicked = await findAndClickTurnstile(page).catch(() => false);
       if (clicked) {
         try {
@@ -236,12 +241,19 @@ export async function waitForHumanVerificationIfNeeded(page: Page, timeoutMs: nu
   // Fallback: wait for manual resolution
   warn('Waiting for manual verification in browser window.');
   const deadline = Date.now() + timeoutMs;
+  let lastBeat = Date.now();
   while (Date.now() < deadline) {
     if (isAborted && isAborted()) {
       info('Abort signal detected during manual verification wait.');
       return false;
     }
     await page.waitForTimeout(2000);
+    // Heartbeat every ~15s during the manual wait — this loop can sit for
+    // minutes (cloudflareWaitMs) and previously emitted nothing.
+    if (Date.now() - lastBeat >= 15000) {
+      lastBeat = Date.now();
+      uiStatus(`Cloudflare verification — manual wait (${Math.ceil((deadline - Date.now()) / 1000)}s left)`);
+    }
     if (!(await isHumanVerificationPresent(page))) {
       info('Human verification completed.');
       return true;

@@ -1,5 +1,5 @@
 import type { Page, Response } from 'patchright';
-import { warn, info } from './logger';
+import { warn, info, uiStatus } from './logger';
 
 export type ScheduleApiResult = {
   response: Response | null;
@@ -49,6 +49,11 @@ function extractJsonObject(text: string): any | null {
  */
 export async function waitForScheduleResponse(page: Page, timeoutMs: number, postIdFilter?: string): Promise<ScheduleApiResult> {
   info('Waiting for schedule API response');
+
+  // Heartbeat: this wait can run up to 75s inside drop windows — emit a
+  // status marker every 15s so the UI doesn't freeze on the last line.
+  const beat = setInterval(() => uiStatus('Checking city — waiting for response'), 15000);
+  beat.unref?.();
 
   try {
     const response = await page.waitForResponse(
@@ -145,5 +150,7 @@ export async function waitForScheduleResponse(page: Page, timeoutMs: number, pos
     }
 
     throw error;
+  } finally {
+    clearInterval(beat);
   }
 }

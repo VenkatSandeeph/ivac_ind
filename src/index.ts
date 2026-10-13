@@ -725,6 +725,7 @@ async function preciseSleepUntilSpecialWindow(triggerSec: number): Promise<void>
   // Coarse sleep in <=500ms chunks until ~1s before the target
   const coarseUntil = targetMs - 1000;
   let nowMs = Date.now();
+  let lastBeat = Date.now();
   while (nowMs < coarseUntil) {
     // Check stop signal during long waits (e.g. waiting for special window)
     try {
@@ -734,6 +735,12 @@ async function preciseSleepUntilSpecialWindow(triggerSec: number): Promise<void>
         return;
       }
     } catch { /* ignore */ }
+    // Heartbeat — special-window waits can run for minutes; keep the UI
+    // status alive so it doesn't freeze on a stale label.
+    if (Date.now() - lastBeat >= 15000) {
+      lastBeat = Date.now();
+      uiStatus(`Waiting for drop window — ${Math.ceil((targetMs - Date.now()) / 1000)}s`);
+    }
     const chunk = Math.min(500, coarseUntil - nowMs);
     await new Promise(r => setTimeout(r, chunk));
     nowMs = Date.now();
@@ -780,11 +787,19 @@ function clearStopSignal(): void {
 async function sleepWithStopSignal(ms: number): Promise<boolean> {
   const chunkMs = 1000;
   let remaining = ms;
+  let lastBeat = Date.now();
   while (remaining > 0) {
     if (checkStopSignal()) return true;
     const wait = Math.min(chunkMs, remaining);
     await new Promise((r) => setTimeout(r, wait));
     remaining -= wait;
+    // Heartbeat: the UI status only refreshes on new output — during long
+    // quiet waits (cooldowns, block backoffs) emit a liveness marker every
+    // ~15s so the status doesn't freeze on the last line.
+    if (ms >= 15000 && remaining > 0 && Date.now() - lastBeat >= 15000) {
+      lastBeat = Date.now();
+      uiStatus(`Waiting — ${Math.ceil(remaining / 1000)}s left`);
+    }
   }
   return false;
 }
@@ -1119,6 +1134,7 @@ async function isVerificationPage(page: any) {
 async function resumeFromCurrentPage(page: any, config: any, options?: { allowNavigation?: boolean }) {
   const allowNavigation = options?.allowNavigation !== false;
   const maxAttempts = 30;
+  uiStatus('Recovering page state');
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const currentUrl = page.url();
     const currentTitle = await page.title().catch(() => '');
@@ -1139,6 +1155,9 @@ async function resumeFromCurrentPage(page: any, config: any, options?: { allowNa
     const state = { internal, schedule, consular, login: onLoginPage, privacyAct, security, home, verification, relevant };
 
     info(`Resume check [${attempt}/${maxAttempts}]: URL =`, currentUrl, 'title =', currentTitle, 'state =', state);
+    // Heartbeat: this loop is ~60s of polling with no client-facing output —
+    // keep the UI status refreshed so it doesn't look frozen.
+    if (attempt % 8 === 0) uiStatus(`Recovering page state (${attempt}/${maxAttempts})`);
 
     // Check for hard block pages (Cloudflare IP block / Access limitation).
     // These can appear after an API call gets blocked and the page redirects.
