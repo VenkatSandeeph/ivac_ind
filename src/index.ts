@@ -20,7 +20,6 @@ import {
   navigateToOfcSchedule,
   selectCity,
   detectNoSlots,
-  selectFirstAvailableTime,
   submitAppointment,
   getHomePageUrl,
   getAvailableTimeCandidates,
@@ -31,7 +30,6 @@ import {
   waitForCalendarReady,
   selectCalendarMonthYear,
   getAvailableDates,
-  getSortedDatesInRange,
   getDatesWithAllAvailable,
   clickDateCell
 } from './calendar';

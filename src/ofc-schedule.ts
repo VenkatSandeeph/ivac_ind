@@ -539,17 +539,6 @@ export async function waitForSubmitEnabled(page: Page, timeoutMs = 5000): Promis
   ).catch(() => false));
 }
 
-/**
- * Backward-compat wrapper: pick the best available time (preferred first, else highest avail)
- * and select it. Returns the selected time string or null.
- */
-export async function selectFirstAvailableTime(page: Page, preferredTime?: string | null): Promise<string | null> {
-  const candidates = await getAvailableTimeCandidates(page, preferredTime);
-  if (candidates.length === 0) return null;
-  await selectTimeCandidate(page, candidates[0]);
-  return candidates[0].time;
-}
-
 export async function submitAppointment(
   page: Page,
   config?: AutomationConfig,

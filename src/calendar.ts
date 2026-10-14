@@ -230,20 +230,6 @@ export async function clickCalendarDate(page: Page, dateStr: string) {
 }
 
 /**
- * Return all green (available) dates within [startDate, endDate], sorted:
- *   preferredDates first (in the order they appear in the array), then by ascending date.
- */
-export async function getSortedDatesInRange(
-  page: Page,
-  startDate: string,
-  endDate: string,
-  preferredDates: string[] = []
-): Promise<DateCell[]> {
-  const { inRange } = await getDatesWithAllAvailable(page, startDate, endDate, preferredDates);
-  return inRange;
-}
-
-/**
  * Single DOM evaluation that returns BOTH:
  *   - allAvailable: every green (available) date on the visible calendar month
  *   - inRange: the subset of allAvailable within [startDate, endDate], sorted
@@ -287,7 +273,7 @@ export async function getDatesWithAllAvailable(
 }
 
 /**
- * Click a specific DateCell (returned from getSortedDatesInRange / getAvailableDates).
+ * Click a specific DateCell (returned from getDatesWithAllAvailable / getAvailableDates).
  * Falls back to in-page dispatch if the Playwright click fails.
  */
 export async function clickDateCell(page: Page, cell: DateCell): Promise<void> {
@@ -302,9 +288,3 @@ export async function clickDateCell(page: Page, cell: DateCell): Promise<void> {
   }
 }
 
-export async function chooseDateInRange(page: Page, startDate: string, endDate: string, preferredDates: string[] = []) {
-  const sorted = await getSortedDatesInRange(page, startDate, endDate, preferredDates);
-  if (sorted.length === 0) return null;
-  await clickDateCell(page, sorted[0]);
-  return sorted[0].date;
-}

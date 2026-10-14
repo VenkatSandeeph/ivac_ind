@@ -3,6 +3,7 @@
   "scheduleUrl": "https://www.usvisascheduling.com/en-US/ofc-schedule/",
   "username": "YOUR_USERNAME",
   "password": "YOUR_PASSWORD",
+  "visaType": "B1/B2",
   "securityQuestions": [
     {
       "question": "What is your mother's maiden name?",

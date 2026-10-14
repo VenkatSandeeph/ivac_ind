@@ -151,7 +151,8 @@ function migrateLegacyConfig(raw) {
       cityRetrySeconds: 15
     },
     chromeUserDataDir: path.join(PROJECT_ROOT, 'chrome-debug-1'),
-    chromeRemoteDebugPort: 9222
+    chromeRemoteDebugPort: 9222,
+    visaType: raw.visaType || ''
   };
 
   return {

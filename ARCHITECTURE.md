@@ -278,7 +278,7 @@ powershell -NoProfile -Command "Compress-Archive -Path 'release<N>/win-unpacked\
 
 - **`selectCity(page, city, skipEmpty, config)`** -- Selects a city from the OFC dropdown. First selects the empty option (if `skipEmpty` is false) to force a schedule refresh, then selects the target city. Dispatches `change`, `input`, `mousedown`, `mouseup`, `click` events. Adds 0-500ms random jitter before selection. After selection, waits up to 15s for the calendar to appear and sends a Supabase event with detected available dates.
 
-- **`selectFirstAvailableTime(page, preferredTime)`** -- Reads time rows from `#time_select tbody tr`. For each row, reads `data-slots` attribute (or falls back to cell text) for availability count. If `preferredTime` matches a row's text, selects it immediately. Otherwise selects the row with highest availability (minimum 1 slot). Uses `page.evaluate()` to programmatically check the radio button and dispatch events.
+- **`getAvailableTimeCandidates(page, preferredTime)`** / **`selectTimeCandidate(page, candidate)`** -- Reads time rows from `#time_select tbody tr` (`data-slots` attr or cell text for availability), sorts preferred-first, then checks the chosen row's radio via `page.evaluate()`.
 
 - **`submitAppointment(page, config)`** -- Waits for `#submitbtn` to become enabled (up to 15s). Falls back to role-based button lookup. Sends Supabase event before clicking. Returns `true` on success, `false` on failure.
 
@@ -292,7 +292,7 @@ powershell -NoProfile -Command "Compress-Archive -Path 'release<N>/win-unpacked\
 
 - **`getAvailableDates(page)`** -- Reads available (non-disabled) day cells. Extracts date from `data-month` and `data-year` attributes on `<td>`, or falls back to reading month/year labels from the datepicker group. Returns `DateCell[]` with `{ date: "YYYY-MM-DD", locator }`.
 
-- **`chooseDateInRange(page, startDate, endDate, preferredDates)`** -- Filters available dates by range, sorts by preferred dates then chronologically, clicks the best match. Falls back to `clickCalendarDate()` if Playwright click fails.
+- **`getDatesWithAllAvailable(page, startDate, endDate, preferredDates)`** -- Single DOM read returning both all green dates and the in-range subset (preferred-first, then chronological).
 
 - **`clickCalendarDate(page, dateStr)`** -- In-page date clicking. Iterates `.ui-datepicker-group` elements, matches month/year, finds the day link, and dispatches `mousedown`/`mouseup`/`click` events.
 
@@ -707,12 +707,12 @@ main()
         |     +-- Date/time selection loop (maxDateAttempts):
         |     |     +-- waitForCalendarReady (with 3 recovery attempts)
         |     |     +-- selectCalendarMonthYear
-        |     |     +-- chooseDateInRange
+        |     |     +-- getDatesWithAllAvailable + clickDateCell
         |     |     |     +-- If no date in month -> cross-month scan
         |     |     |     +-- If no date at all -> break to outer loop
         |     |     +-- Save checkpoint (state: date_selected)
         |     |     +-- Screenshot (if enabled)
-        |     |     +-- selectFirstAvailableTime
+        |     |     +-- getAvailableTimeCandidates + selectTimeCandidate
         |     |     |     +-- If no time -> retry date/time loop
         |     |     +-- Save checkpoint (state: time_selected)
         |     |     +-- Screenshot (if enabled)

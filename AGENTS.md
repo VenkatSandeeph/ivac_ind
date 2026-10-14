@@ -82,6 +82,7 @@ Called from `logCitySelected` in `src/index.ts` — the choke point all OFC sele
 `src/consular-schedule.ts` — after OFC is booked the script lands on `/en-US/schedule/`. The stage sweeps **all** configured consular cities each cycle (2–4s gap between selects), then waits `consular.cityRetrySeconds` (default 15s, per-profile `consular` block or settings `consularCityRetrySeconds`) before the next sweep. Same DOM contract as OFC (`#post_select`, `#datepicker`, `#time_select`, `#submitbtn`, `jsdata.Num`) so `ofc-schedule.ts`/`calendar.ts` helpers are reused; only the routes differ (`get-family-consular-schedule-days/-entries`, `schedule-consular-appointments-for-family`). City names have no " VAC" suffix — stripped at config merge.
 
 - **Config**: profile `consular: {city[], startDate, endDate, cityRetrySeconds}` — all optional. Empty cities → OFC cities minus ` VAC`; empty dates → **auto range = booked OFC date +2 business days → +30 working days** (India posts enforce consular ≥2 business days after OFC). OFC date source: `result.bookedDate` → checkpoint `date` → page `ofcAppointments` global (covers resume). UI: Consular section in the profile editor.
+- **UI status**: the consular-stage status label reads `Consular — OFC: <M/D/YYYY h:mm AM>` — scraped ONCE per process from the page's `ofcAppointments[0].appointmentDateStr` global (cached in `ofcAppointmentCache`, shared with the auto-range resolver), re-emitted each sweep so heartbeats can't drop it permanently. Fallback: plain `Consular` when the global is absent.
 - **Response-aware submit**: `submitConsular` arms a `schedule-consular-appointments-for-family` response listener before clicking — `HasError` verdicts return in ~1–3s instead of the old 60s nav-wait stall; `AllScheduled` → confirmation page → `sendConfirmationPdfToTelegram` (local `artifacts/confirmations/` PDF + Telegram doc).
 - **Seat eligibility**: consular `validateData` only checks `jsdata.Num` — candidates are filtered client-side to `avail >= applications.length` (page global populated by the members query).
 - **Not ported**: the OFC 3-tier direct API and wire replay are OFC-only — consular is DOM + response capture (same as the OFC DOM fallback).
@@ -243,8 +244,8 @@ The slot tracker (`src/slot-tracker.ts`) records every calendar visibility event
 | `calendarMonth` | string \| null | Best-effort calendar month label (e.g. "October 2026"); null if not extracted |
 
 **Hook points:**
-- **OFC stage** (`src/index.ts`): after `waitForCalendarReady()` succeeds and `getSortedDatesInRange()` returns. Records the current city and any alternate cities tried during multi-city rotation.
-- **Consular stage** (`src/consular-schedule.ts`): after `waitForCalendarReady()` succeeds and `getSortedDatesInRange()` returns.
+- **OFC stage** (`src/index.ts`): after `waitForCalendarReady()` succeeds and `getDatesWithAllAvailable()` returns. Records the current city and any alternate cities tried during multi-city rotation.
+- **Consular stage** (`src/consular-schedule.ts`): after `waitForCalendarReady()` succeeds and `getDatesWithAllAvailable()` returns.
 
 **Dual beep on calendar visibility:**
 - `playBeep()` (in `src/beep.ts`) fires the moment the calendar becomes visible — right after `waitForCalendarReady()` succeeds — regardless of whether any dates fall in the configured range.
@@ -313,7 +314,8 @@ The "Slot Pattern" button in the topbar (next to "Edit Profiles") opens a popup 
 - **Screenshot gallery.** View and prune per-profile screenshots in the UI.
 - **Auto-updater.** Use Electron `autoUpdater` or a custom in-app updater.
 - **In-app help and tooltips.** Explain every field in the profile editor.
-- **Profile status labels.** Each profile row should show: Login page, Cloudflare, Schedule page, Home Page, or Consular.
+- **Profile status labels.** Each profile row should show: Login page, Cloudflare, Schedule page, Home Page, or Consular. (Done — `[UI_STATUS]` markers + heartbeats; consular shows `Consular — OFC: <date time>`.)
+- **Profile `visaType` field.** Optional free-text in the profile editor (above the Appointment section) → `profile.visaType` in `config.local.json` → shown as `visatype: <value>` on the dashboard card. Display-only — the core never reads it.
 - **Log switching.** Logs must update independently per running profile and be switchable in the Logs section.
 - **Start/stop state accuracy.** UI state must reflect actual process state, including after duplicate-profile errors or deletion.
 

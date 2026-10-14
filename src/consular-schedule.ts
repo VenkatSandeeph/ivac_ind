@@ -56,6 +56,44 @@ type ConsularSubmitVerdict = {
 const consularDaysWaiters: Array<(count: number) => void> = [];
 const consularSubmitWaiters: Array<(v: ConsularSubmitVerdict) => void> = [];
 
+// =============================================================================
+// Booked-OFC appointment label (shown in the UI status while in consular stage)
+// -----------------------------------------------------------------------------
+// The consular page exposes the booked OFC appointment as a page global:
+//   window.ofcAppointments[0].appointmentDateStr  e.g. "11/25/2026 10:00:00 AM"
+// Scraped ONCE per process (the value can't change mid-run) and cached — every
+// consular status re-emits the cached label so it survives heartbeats.
+// =============================================================================
+
+type OfcAppointmentInfo = { raw: string; iso: string | null };
+let ofcAppointmentCache: OfcAppointmentInfo | null = null;
+
+/** Scrape ofcAppointments once; subsequent calls return the cache. */
+async function scrapeOfcAppointment(page: Page): Promise<OfcAppointmentInfo | null> {
+  if (ofcAppointmentCache) return ofcAppointmentCache;
+  const raw = await page.evaluate(() => {
+    const arr = (window as any).ofcAppointments;
+    return Array.isArray(arr) && arr.length > 0 ? String(arr[0].appointmentDateStr || '') : '';
+  }).catch(() => '');
+  if (!raw) return null;
+  ofcAppointmentCache = { raw, iso: parseOfcDateStr(raw) };
+  info(`Consular stage: booked OFC appointment from page global: "${raw}" (iso=${ofcAppointmentCache.iso ?? 'unparsed'})`);
+  return ofcAppointmentCache;
+}
+
+/** "11/25/2026 10:00:00 AM" → "11/25/2026 10:00 AM" (drop seconds; keep page format). */
+function formatOfcDisplayLabel(raw: string): string {
+  const m = /(\d{1,2}\/\d{1,2}\/\d{4})\s+(\d{1,2}:\d{2})(?::\d{2})?\s*([AaPp][Mm])?/.exec(raw);
+  if (!m) return raw.trim().substring(0, 30);
+  return `${m[1]} ${m[2]}${m[3] ? ' ' + m[3].toUpperCase() : ''}`;
+}
+
+/** The consular-stage status label — includes the booked OFC date/time when known. */
+function consularStatusLabel(): string {
+  if (!ofcAppointmentCache) return 'Consular';
+  return `Consular — OFC: ${formatOfcDisplayLabel(ofcAppointmentCache.raw)}`;
+}
+
 /**
  * Resolves with the ScheduleDays count from the next
  * get-family-consular-schedule-days response. Arm BEFORE selectCity — the
@@ -251,12 +289,9 @@ export async function resolveConsularRange(
   }
 
   if (!ofcDate) {
-    const scraped = await page.evaluate(() => {
-      const arr = (window as any).ofcAppointments;
-      return Array.isArray(arr) && arr.length > 0 ? String(arr[0].appointmentDateStr || '') : '';
-    }).catch(() => '');
-    ofcDate = parseOfcDateStr(scraped);
-    if (ofcDate) info(`Consular range: scraped booked OFC date from page global: ${ofcDate}`);
+    const scraped = await scrapeOfcAppointment(page);
+    ofcDate = scraped?.iso ?? null;
+    if (ofcDate) info(`Consular range: booked OFC date from page global: ${ofcDate}`);
   }
 
   if (ofcDate) {
@@ -401,6 +436,10 @@ export async function runConsularSchedule(
   }
   info(`Consular stage: page ready at ${page.url()} (${Date.now() - consularStart}ms)`);
 
+  // Read the booked OFC appointment once — the page global doesn't change
+  // mid-run. It feeds both the UI status label and the auto range below.
+  await scrapeOfcAppointment(page);
+
   const consularCities = config.consular.city;
   if (consularCities.length === 0) {
     warn('Consular stage: no consular cities configured (and OFC fallback produced none); aborting.');
@@ -408,8 +447,9 @@ export async function runConsularSchedule(
   }
 
   const range = await resolveConsularRange(page, config, ofcDate);
-  info(`Consular stage: date range ${range.startDate} → ${range.endDate} (${range.source}); cities=[${consularCities.join(', ')}]`);
-  uiStatus(`Consular — sweeping ${consularCities.length} cit${consularCities.length === 1 ? 'y' : 'ies'}`);
+  info(`Consular stage: date range ${range.startDate} → ${range.endDate} (${range.source}); sweeping ${consularCities.length} cit${consularCities.length === 1 ? 'y' : 'ies'}: [${consularCities.join(', ')}]`);
+  // Every sweep re-emits the cached OFC-detail label — pulls once, displays always.
+  uiStatus(consularStatusLabel());
 
   // Month/year jump target derived from the resolved range start (same trick
   // mergeWithDefaults uses for OFC — the removed UI fields still drive the

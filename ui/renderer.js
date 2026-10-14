@@ -310,6 +310,7 @@ function renderProfiles() {
           <div class="profile-user">${p.username || 'Unknown'}${isSelectedForLogs}</div>
           <div class="profile-detail">${cities}</div>
           <div class="profile-range">${a.startDate || ''} &rarr; ${a.endDate || ''}</div>
+          ${p.visaType ? `<div class="profile-range" style="color:#8fb98f">visatype: ${p.visaType}</div>` : ''}
           ${consLine ? `<div class="profile-range" style="color:#7ea2c9">${consLine}</div>` : ''}
           <div class="profile-status-line">Status: <b>${status}</b></div>
           <div class="profile-checkpoints">${chips}</div>
@@ -502,6 +503,7 @@ function openModal(profile) {
     document.getElementById('pInstanceIndex').value = profile.instanceIndex || '';
     document.getElementById('pUsername').value = profile.username || '';
     document.getElementById('pPassword').value = profile.password || '';
+    document.getElementById('pVisaType').value = profile.visaType || '';
     fillSecurityQuestions(profile.securityQuestions || []);
 
     const a = profile.appointment || {};
@@ -530,6 +532,7 @@ function openModal(profile) {
     document.getElementById('pInstanceIndex').value = '';
     document.getElementById('pUsername').value = '';
     document.getElementById('pPassword').value = '';
+    document.getElementById('pVisaType').value = '';
     fillSecurityQuestions([]);
     document.querySelectorAll('.city-checks input').forEach((cb) => cb.checked = false);
     document.querySelectorAll('.consular-city-checks input').forEach((cb) => cb.checked = false);
@@ -660,6 +663,8 @@ function buildProfileFromForm(onDone) {
     return;
   }
 
+  const visaType = document.getElementById('pVisaType').value.trim();
+
   // Check for existing username — if adding and username matches, switch to update mode
   let existing = appState.profiles.find((p) => p.username === username);
   if (!id && existing) {
@@ -674,23 +679,24 @@ function buildProfileFromForm(onDone) {
       'Debug port ' + debugPort + ' is already used by ' + otherProfile.username + '. Continue anyway?',
       () => {
         // User confirmed — proceed
-        finishBuildProfile(id, instanceIndex, username, password, securityQuestions, cities, startDate, endDate, debugPort, cityRetrySeconds, consular, onDone);
+        finishBuildProfile(id, instanceIndex, username, password, securityQuestions, cities, startDate, endDate, debugPort, cityRetrySeconds, consular, visaType, onDone);
       },
       onDone
     );
     return;
   }
 
-  finishBuildProfile(id, instanceIndex, username, password, securityQuestions, cities, startDate, endDate, debugPort, cityRetrySeconds, consular, onDone);
+  finishBuildProfile(id, instanceIndex, username, password, securityQuestions, cities, startDate, endDate, debugPort, cityRetrySeconds, consular, visaType, onDone);
 }
 
-function finishBuildProfile(id, instanceIndex, username, password, securityQuestions, cities, startDate, endDate, debugPort, cityRetrySeconds, consular, onDone) {
+function finishBuildProfile(id, instanceIndex, username, password, securityQuestions, cities, startDate, endDate, debugPort, cityRetrySeconds, consular, visaType, onDone) {
   const profile = {
     id: id || undefined,
     instanceIndex,
     username,
     password,
     securityQuestions,
+    visaType,
     appointment: {
       city: cities,
       startDate,
