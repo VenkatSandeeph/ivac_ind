@@ -68,14 +68,40 @@ const consularSubmitWaiters: Array<(v: ConsularSubmitVerdict) => void> = [];
 type OfcAppointmentInfo = { raw: string; iso: string | null };
 let ofcAppointmentCache: OfcAppointmentInfo | null = null;
 
+/**
+ * Evaluate in the page's MAIN world. Patchright deliberately runs
+ * page.evaluate inside an isolated world (stealth) — the DOM is shared but
+ * page script globals (ofcAppointments, jsdata, onClickSubmit, applications)
+ * are invisible there. CDP Runtime.evaluate without a contextId targets the
+ * default execution context = main world. Read-only use only.
+ */
+async function evalInMainWorld(page: Page, expression: string): Promise<unknown> {
+  try {
+    const cdp = await page.context().newCDPSession(page);
+    const r = await cdp.send('Runtime.evaluate', { expression, returnByValue: true });
+    if (r.exceptionDetails) return null;
+    return r.result?.value ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /** Scrape ofcAppointments once; subsequent calls return the cache. */
 async function scrapeOfcAppointment(page: Page): Promise<OfcAppointmentInfo | null> {
   if (ofcAppointmentCache) return ofcAppointmentCache;
-  const raw = await page.evaluate(() => {
-    const arr = (window as any).ofcAppointments;
-    return Array.isArray(arr) && arr.length > 0 ? String(arr[0].appointmentDateStr || '') : '';
-  }).catch(() => '');
-  if (!raw) return null;
+  const value = await evalInMainWorld(page,
+    `(function(){ var a = window.ofcAppointments; return (Array.isArray(a) && a.length > 0 && a[0].appointmentDateStr) ? String(a[0].appointmentDateStr) : ''; })()`
+  );
+  const raw = typeof value === 'string' ? value : '';
+  if (!raw) {
+    // Diagnostic: distinguish "global absent" from "global is an empty array"
+    // so the next log tells us which case this account hits.
+    const state = await evalInMainWorld(page,
+      `(function(){ return !('ofcAppointments' in window) ? 'absent' : (Array.isArray(window.ofcAppointments) ? 'array[' + window.ofcAppointments.length + ']' : typeof window.ofcAppointments); })()`
+    );
+    info(`Consular stage: ofcAppointments scrape empty — page state: ${JSON.stringify(state)}`);
+    return null;
+  }
   ofcAppointmentCache = { raw, iso: parseOfcDateStr(raw) };
   info(`Consular stage: booked OFC appointment from page global: "${raw}" (iso=${ofcAppointmentCache.iso ?? 'unparsed'})`);
   return ofcAppointmentCache;
@@ -350,16 +376,12 @@ async function submitConsular(
   }
 
   // Prefer the page's own onClickSubmit() — same-origin jQuery POST with all
-  // framework state. Fall back to a real button click if unavailable.
-  const usedPageFn = await page.evaluate(() => {
-    try {
-      if (typeof (window as any).onClickSubmit === 'function') {
-        (window as any).onClickSubmit();
-        return true;
-      }
-    } catch { /* fall through */ }
-    return false;
-  });
+  // framework state. It only exists in the MAIN world — page.evaluate runs
+  // in patchright's isolated world where the function is invisible. Fall
+  // back to a real button click if unavailable.
+  const usedPageFn = (await evalInMainWorld(page,
+    `(function(){ if (typeof onClickSubmit === 'function') { onClickSubmit(); return true; } return false; })()`
+  )) === true;
   if (!usedPageFn) {
     await btn.click().catch((e) => warn('Consular submit: button click failed:', e));
   }
@@ -551,12 +573,11 @@ export async function runConsularSchedule(
 
     // Seat-eligibility floor: consular validateData() only checks jsdata.Num,
     // so the server can reject picks with fewer slots than family members.
-    // Filter to avail >= applications.length (read from the page global the
-    // members query populated; fallback 1).
-    const memberCount = await page.evaluate(() => {
-      const a = (window as any).applications;
-      return Array.isArray(a) && a.length > 0 ? a.length : 1;
-    }).catch(() => 1);
+    // Filter to avail >= applications.length — the page global lives in the
+    // MAIN world (isolated-world evaluate always saw undefined → 1).
+    const memberCount = (await evalInMainWorld(page,
+      `(function(){ var a = window.applications; return (Array.isArray(a) && a.length > 0) ? a.length : 1; })()`
+    ) as number | null) ?? 1;
 
     for (let di = 0; di < candidateDates.length; di++) {
       if (shouldStop?.()) return false;
