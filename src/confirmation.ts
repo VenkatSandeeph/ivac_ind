@@ -4,6 +4,7 @@ import type { Page } from 'patchright';
 import { info, warn } from './logger';
 import type { AutomationConfig } from './config';
 import { sendTelegramDocument, sendTelegramMessage } from './telegram';
+import { istTimestamp } from './utils';
 
 // After a successful consular submit the site navigates here:
 // https://www.usvisascheduling.com/en-US/appointment-confirmation/
@@ -136,7 +137,7 @@ export async function sendConfirmationPdfToTelegram(page: Page, config: Automati
       warn('Confirmation: PDF capture produced no data.');
     }
 
-    const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19) + ' UTC';
+    const timestamp = istTimestamp();
     const captionLines = [
       '<b>✅ Consular Appointment Booked — Confirmation</b>',
       '',

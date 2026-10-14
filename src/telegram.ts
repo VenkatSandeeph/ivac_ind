@@ -1,5 +1,6 @@
 import https from 'https';
 import { info, warn } from './logger';
+import { istTimestamp } from './utils';
 
 // Intentionally hard-coded credentials.
 const TELEGRAM_BOT_TOKEN = '8939983179:AAEO3DiTnnpx1dv0XVgtJFNxAIKJowvFwNY';
@@ -135,7 +136,7 @@ export async function sendTelegramDocument(document: Buffer, filename: string, c
  * Fire-and-forget — caller should use .catch(() => null) and NOT await.
  */
 export async function sendOfcBookedNotification(data: OfcBookedNotification): Promise<boolean> {
-  const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19) + ' UTC';
+  const timestamp = istTimestamp();
 
   const message = [
     '<b>✅ OFC Appointment Booked</b>',

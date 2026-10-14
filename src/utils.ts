@@ -70,6 +70,14 @@ export async function waitForPortClosed(port: number, timeoutMs: number): Promis
   return false;
 }
 
+/** Current time as "yyyy-mm-dd HH:mm:ss IST" (Asia/Kolkata) — Telegram captions. */
+export function istTimestamp(): string {
+  return new Date().toLocaleString('en-CA', {
+    timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23'
+  }).replace(',', '') + ' IST';
+}
+
 /**
  * Parse the consular page's ofcAppointments[].appointmentDateStr
  * ("11/25/2026 10:00:00 AM") into yyyy-mm-dd. Returns null on failure.
