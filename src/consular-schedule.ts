@@ -20,10 +20,9 @@ import { playBeep } from './beep';
 import { recordSlotObservation } from './slot-tracker';
 import { recordDateExperiment } from './date-experiment';
 import { sendConfirmationPdfToTelegram, CONFIRMATION_URL_FRAGMENT } from './confirmation';
-import { loadCheckpoint } from './checkpoint';
 import { sendSupabaseEvent } from './supabase';
 import { extractJsonFromHtml, orderDatesForAttempt } from './api-direct';
-import { addBusinessDays, parseOfcDateStr } from './utils';
+import { parseOfcDateStr } from './utils';
 
 const CONSULAR_URL_FRAGMENT = '/en-US/schedule/';
 const citySelectSelector = '#post_select';
@@ -45,6 +44,9 @@ let consularApiCallCount = 0;
 // Last schedule-days count — short-circuits the DOM flow when the API already
 // returned 0 days (avoids waiting 10s+ for a calendar with no green dates).
 let lastConsularScheduleDaysCount = -1;
+// ISO dates from the last days response — drives the calendar month jump in
+// earliest-available mode so we land on the month containing a green date.
+let lastConsularDaysDates: string[] = [];
 
 type ConsularSubmitVerdict = {
   httpStatus: number;
@@ -178,6 +180,7 @@ let consularCapturePage: Page | null = null;
 export function setupConsularResponseCapture(page: Page): void {
   consularApiCallCount = 0;
   lastConsularScheduleDaysCount = -1;
+  lastConsularDaysDates = [];
   if (consularCapturePage === page) return;
   consularCapturePage = page;
 
@@ -240,6 +243,15 @@ export function setupConsularResponseCapture(page: Page): void {
               const count = parsed.ScheduleDays?.length || 0;
               const tokenLen = parsed.Token ? String(parsed.Token).length : 0;
               lastConsularScheduleDaysCount = count;
+              lastConsularDaysDates = (parsed.ScheduleDays || [])
+                .map((d: any) => {
+                  const raw = String(d?.Date ?? '');
+                  const iso = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+                  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
+                  return parseOfcDateStr(raw) ?? '';
+                })
+                .filter(Boolean)
+                .sort();
               info(`[CONSULAR] getScheduleDays: ${count} day(s), token=${tokenLen > 0 ? 'present' : 'null'}, HasError=${parsed.HasError || false}`);
               while (consularDaysWaiters.length) consularDaysWaiters.shift()!(count);
             } else if (route.includes('schedule-entries')) {
@@ -289,51 +301,19 @@ export async function waitForConsularSchedulePage(page: Page, timeoutMs = 30000)
 // =============================================================================
 
 /**
- * Resolve the consular date range. Priority:
- *   1. Explicit consular.startDate/endDate from config
- *   2. Auto range from the booked OFC date: +2 business days → +30 working days
- *      (India posts enforce consular ≥2 business days after OFC for document
- *      forwarding; +30wd keeps the window inside the ~6-week booking horizon).
- *      OFC date sources: caller hint → runtime checkpoint → the page's own
- *      ofcAppointments[] global (works on resume-after-restart).
- *   3. Fallback: the OFC configured range (today's behavior — never a crash).
+ * Resolve the consular date range. With configured consular.startDate/endDate
+ * → use them verbatim. Without → UNBOUNDED (''/'', 'earliest available'): the
+ * site only renders dates it considers bookable — it never shows dates
+ * earlier than the booked OFC appointment — so the earliest green cell on
+ * the calendar is always a valid pick and no client-side window is needed.
  */
-export async function resolveConsularRange(
-  page: Page,
-  config: AutomationConfig,
-  ofcDateHint?: string
-): Promise<{ startDate: string; endDate: string; source: string }> {
+export function resolveConsularRange(
+  config: AutomationConfig
+): { startDate: string; endDate: string; source: string } {
   if (config.consular.startDate && config.consular.endDate) {
     return { startDate: config.consular.startDate, endDate: config.consular.endDate, source: 'configured' };
   }
-
-  let ofcDate = ofcDateHint?.match(/^\d{4}-\d{2}-\d{2}/)?.[0] || null;
-
-  if (!ofcDate) {
-    const cp = loadCheckpoint();
-    if (cp?.date && /^\d{4}-\d{2}-\d{2}/.test(cp.date)) ofcDate = cp.date.substring(0, 10);
-  }
-
-  if (!ofcDate) {
-    const scraped = await scrapeOfcAppointment(page);
-    ofcDate = scraped?.iso ?? null;
-    if (ofcDate) info(`Consular range: booked OFC date from page global: ${ofcDate}`);
-  }
-
-  if (ofcDate) {
-    return {
-      startDate: addBusinessDays(ofcDate, 2),
-      endDate: addBusinessDays(ofcDate, 30),
-      source: `auto from OFC ${ofcDate}`
-    };
-  }
-
-  warn('Consular range: booked OFC date unavailable — falling back to the OFC configured range.');
-  return {
-    startDate: config.appointment.startDate,
-    endDate: config.appointment.endDate,
-    source: 'ofc-range-fallback'
-  };
+  return { startDate: '', endDate: '', source: 'earliest available' };
 }
 
 // =============================================================================
@@ -444,7 +424,6 @@ async function submitConsular(
 export async function runConsularSchedule(
   page: Page,
   config: AutomationConfig,
-  ofcDate?: string,
   shouldStop?: () => boolean
 ): Promise<boolean> {
   const consularStart = Date.now();
@@ -459,7 +438,7 @@ export async function runConsularSchedule(
   info(`Consular stage: page ready at ${page.url()} (${Date.now() - consularStart}ms)`);
 
   // Read the booked OFC appointment once — the page global doesn't change
-  // mid-run. It feeds both the UI status label and the auto range below.
+  // mid-run; it feeds the UI status label.
   await scrapeOfcAppointment(page);
 
   const consularCities = config.consular.city;
@@ -468,17 +447,11 @@ export async function runConsularSchedule(
     return false;
   }
 
-  const range = await resolveConsularRange(page, config, ofcDate);
-  info(`Consular stage: date range ${range.startDate} → ${range.endDate} (${range.source}); sweeping ${consularCities.length} cit${consularCities.length === 1 ? 'y' : 'ies'}: [${consularCities.join(', ')}]`);
+  const range = resolveConsularRange(config);
+  const unbounded = !range.startDate || !range.endDate;
+  info(`Consular stage: ${unbounded ? 'no configured range — booking the earliest available date' : `date range ${range.startDate} → ${range.endDate} (${range.source})`}; sweeping ${consularCities.length} cit${consularCities.length === 1 ? 'y' : 'ies'}: [${consularCities.join(', ')}]`);
   // Every sweep re-emits the cached OFC-detail label — pulls once, displays always.
   uiStatus(consularStatusLabel());
-
-  // Month/year jump target derived from the resolved range start (same trick
-  // mergeWithDefaults uses for OFC — the removed UI fields still drive the
-  // calendar-jump fallback).
-  const startParts = /^(\d{4})-(\d{2})-\d{2}/.exec(range.startDate);
-  const targetMonth = startParts ? Number(startParts[2]) : config.appointment.month;
-  const targetYear = startParts ? Number(startParts[1]) : config.appointment.year;
 
   for (let ci = 0; ci < consularCities.length; ci++) {
     if (shouldStop?.()) return false;
@@ -523,13 +496,26 @@ export async function runConsularSchedule(
       continue;
     }
 
-    try {
-      await selectCalendarMonthYear(page, targetMonth, targetYear);
-    } catch (err) {
-      warn('Consular stage: failed to navigate calendar month/year:', err);
+    // Month/year jump: configured range → its start month; unbounded → the
+    // month of the earliest day the API just reported (ScheduleDays carries
+    // real dates). Fallback: the OFC configured month — same trick
+    // mergeWithDefaults uses for OFC.
+    const jumpTarget = range.startDate || lastConsularDaysDates[0]
+      || (config.appointment.year && config.appointment.month
+          ? `${config.appointment.year}-${String(config.appointment.month).padStart(2, '0')}-01`
+          : '');
+    const jumpParts = /^(\d{4})-(\d{2})-\d{2}/.exec(jumpTarget);
+    if (jumpParts) {
+      try {
+        await selectCalendarMonthYear(page, Number(jumpParts[2]), Number(jumpParts[1]));
+      } catch (err) {
+        warn('Consular stage: failed to navigate calendar month/year:', err);
+      }
     }
 
-    const { allAvailable, inRange } = await getDatesWithAllAvailable(page, range.startDate, range.endDate, []);
+    // Unbounded → wide-open bounds: every green cell counts as in range.
+    const { allAvailable, inRange } = await getDatesWithAllAvailable(
+      page, range.startDate || '0000-01-01', range.endDate || '9999-12-31', []);
 
     // Client verdict + slot-tracker observation (fire-and-forget).
     if (allAvailable.length > 0) {
@@ -547,10 +533,10 @@ export async function runConsularSchedule(
       availableDates: allAvailable.map(d => d.date),
       inRangeDates: inRange.map(d => d.date),
       configuredRange: {
-        startDate: range.startDate,
-        endDate: range.endDate,
-        month: targetMonth,
-        year: targetYear,
+        startDate: range.startDate || 'any',
+        endDate: range.endDate || 'any',
+        month: jumpParts ? Number(jumpParts[2]) : 'any',
+        year: jumpParts ? Number(jumpParts[1]) : 0,
       },
       apiScheduleDays: effectiveDays ?? 0,
       apiScheduleEntries: 0,

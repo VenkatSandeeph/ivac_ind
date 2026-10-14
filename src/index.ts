@@ -332,8 +332,7 @@ async function runConsularStageWithRecovery(
   page: Page,
   config: any,
   runId: string,
-  attempt: number,
-  ofcDate?: string
+  attempt: number
 ): Promise<boolean> {
   const consularRetryMs = Math.max(1, config.consular?.cityRetrySeconds ?? 15) * 1000; // per-profile consular sweep gap
   const max403Retries = 3;       // max 403 recovery cycles before waiting longer
@@ -374,7 +373,7 @@ async function runConsularStageWithRecovery(
     client('🏛️', `Checking consular: ${(config.consular?.city || []).join(', ') || 'configured city'}...`);
     let consularOk = false;
     try {
-      consularOk = await runConsularSchedule(page, config, ofcDate, checkStopSignal);
+      consularOk = await runConsularSchedule(page, config, checkStopSignal);
     } catch (e) {
       if (isBrowserClosedError(e)) throw e;
       warn('Consular monitoring: runConsularSchedule threw error:', e);
@@ -2110,7 +2109,7 @@ async function main() {
         // Run consular stage with continuous monitoring and 403 recovery.
         // This does NOT return false on failure — it keeps trying until
         // consular is booked or the stop signal is detected.
-        const consularOk = await runConsularStageWithRecovery(page, config, runId, attempt, result.bookedDate || undefined);
+        const consularOk = await runConsularStageWithRecovery(page, config, runId, attempt);
         if (consularOk) {
           // Full success (OFC + consular both submitted)
           booked = true;
@@ -2919,7 +2918,7 @@ async function main() {
             notificationVideoOpened = true;
           }
 
-          const consularOk = await runConsularStageWithRecovery(page, config, runId, attempt, selectedDate || undefined);
+          const consularOk = await runConsularStageWithRecovery(page, config, runId, attempt);
           if (!consularOk) {
             warn('Consular stage did not complete (stop signal or browser closed); aborting date/time loop');
             hardStop = true;

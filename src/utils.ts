@@ -70,27 +70,6 @@ export async function waitForPortClosed(port: number, timeoutMs: number): Promis
   return false;
 }
 
-/** Format a Date as yyyy-mm-dd (local calendar date, not UTC-shifted). */
-export function toISODate(d: Date): string {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
-}
-
-/** Add `n` Mon–Fri business days to a yyyy-mm-dd date. Returns yyyy-mm-dd. */
-export function addBusinessDays(isoDate: string, n: number): string {
-  const d = new Date(isoDate + 'T00:00:00');
-  if (isNaN(d.getTime())) return isoDate;
-  let remaining = n;
-  while (remaining > 0) {
-    d.setDate(d.getDate() + 1);
-    const dow = d.getDay();
-    if (dow >= 1 && dow <= 5) remaining--;
-  }
-  return toISODate(d);
-}
-
 /**
  * Parse the consular page's ofcAppointments[].appointmentDateStr
  * ("11/25/2026 10:00:00 AM") into yyyy-mm-dd. Returns null on failure.
