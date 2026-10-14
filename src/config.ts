@@ -33,6 +33,16 @@ export type AppointmentConfig = {
   preferredTime?: string | null;
 };
 
+// Consular stage config — independent of the OFC appointment block.
+// Empty startDate/endDate mean "auto": resolved at runtime to
+// (booked OFC date + 2 business days) → (booked OFC date + 30 working days).
+export type ConsularConfig = {
+  city: string[];
+  startDate: string;
+  endDate: string;
+  cityRetrySeconds: number;
+};
+
 export type AutomationConfig = {
   authUrl: string;
   scheduleUrl: string;
@@ -40,6 +50,7 @@ export type AutomationConfig = {
   password: string;
   securityQuestions: SecurityQuestionConfig[];
   appointment: AppointmentConfig;
+  consular: ConsularConfig;
   chromeExecutable: string;
   chromeUserDataDir: string;
   chromeRemoteDebugPort: number;
@@ -72,6 +83,7 @@ export type ProfileConfig = {
   securityQuestions: SecurityQuestionConfig[];
   // month/year optional — derived from startDate during merge when absent
   appointment: Partial<AppointmentConfig>;
+  consular?: Partial<ConsularConfig>;
   authUrl?: string;
   scheduleUrl?: string;
   chromeExecutable?: string;
@@ -121,6 +133,7 @@ export type SettingsConfig = {
   autoRotateIp: boolean;
   ipMode: IpMode;
   specialWindowOnly: boolean;
+  consularCityRetrySeconds?: number;
   nordvpn: NordVpnConfig;
 };
 
@@ -296,6 +309,7 @@ function resolveProfile(raw: unknown, profileId: string | null): { settings: Par
       endDate: '',
       preferredTime: null
     },
+    consular: (legacy as any).consular,
     chromeExecutable: legacy.chromeExecutable,
     chromeUserDataDir: legacy.chromeUserDataDir,
     chromeRemoteDebugPort: legacy.chromeRemoteDebugPort
@@ -334,6 +348,23 @@ function mergeWithDefaults(settings: Partial<SettingsConfig>, profile: ProfileCo
       profile.appointment?.preferredTime ?? env.APPOINTMENT_PREFERRED_TIME ?? null
   };
 
+  // Consular stage. Empty consular.city falls back to the OFC cities with the
+  // " VAC" suffix stripped (consular dropdown uses post names without it).
+  // Empty dates stay empty — runConsularSchedule resolves the auto range
+  // (booked OFC date +2 business days → +30 working days) at runtime.
+  const ofcCities = Array.isArray(appointment.city) ? appointment.city : [appointment.city];
+  const consularRaw = parseCityList(profile.consular?.city ?? env.CONSULAR_CITY ?? '');
+  const consularConfigured = Array.isArray(consularRaw) ? consularRaw : (consularRaw ? [consularRaw] : []);
+  const consular: ConsularConfig = {
+    city: (consularConfigured.length > 0 ? consularConfigured : ofcCities)
+      .map((c) => String(c).replace(/\s+VAC\s*$/i, '').trim())
+      .filter((c) => c.length > 0),
+    startDate: (profile.consular?.startDate ?? env.CONSULAR_START_DATE ?? '').trim(),
+    endDate: (profile.consular?.endDate ?? env.CONSULAR_END_DATE ?? '').trim(),
+    cityRetrySeconds:
+      parseNumber(profile.consular?.cityRetrySeconds ?? settings.consularCityRetrySeconds ?? env.CONSULAR_CITY_RETRY_SECONDS, 15)
+  };
+
   const securityQuestions = Array.isArray(profile.securityQuestions)
     ? profile.securityQuestions
     : [];
@@ -349,6 +380,7 @@ function mergeWithDefaults(settings: Partial<SettingsConfig>, profile: ProfileCo
     password: profile.password ?? env.PASSWORD ?? '',
     securityQuestions,
     appointment,
+    consular,
     chromeExecutable:
       profile.chromeExecutable ?? settings.chromeExecutable ?? env.CHROME_EXECUTABLE ?? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
     chromeUserDataDir:
@@ -487,6 +519,17 @@ export function loadConfig(): AutomationConfig {
 
   if (config.appointment.year < 2000) {
     throw new Error('Appointment year must be a valid four-digit year.');
+  }
+
+  // Consular dates are optional (empty = auto range from the booked OFC date),
+  // but when both are set they must be a valid ordered range.
+  if (config.consular.startDate || config.consular.endDate) {
+    if (!config.consular.startDate || !config.consular.endDate) {
+      throw new Error('Consular startDate and endDate must be set together (or both left empty for auto range).');
+    }
+    if (new Date(config.consular.startDate) > new Date(config.consular.endDate)) {
+      throw new Error('Consular startDate must be earlier than or equal to endDate.');
+    }
   }
 
   return config;

@@ -63,7 +63,7 @@ Observed during a slot drop (NEW DELHI, :56 window): the days call took 21s unde
 
 ### EXPERIMENTAL: avoidEarliestDate ("2nd Date" header toggle)
 
-Theory: bots concentrate on the earliest available date, so the 2nd-earliest sees less submit contention. When ON (`settings.avoidEarliestDate`, per-profile override supported) and ≥2 in-range dates exist with the 2nd within **7 working days** of the earliest, the attempt order becomes `[2nd, 1st, 3rd, ...]` — the earliest stays the immediate fallback in the same attempt (reorder, never skip). Applied at one seam — `orderDatesForAttempt` in `src/api-direct.ts` — used by the fast flow (`matchingDates`) and the DOM path (`candidateDates`, both call sites). Working days = Mon–Fri only (no holiday calendar). OFC-only; consular keeps earliest-first. All edits are marked `// EXPERIMENTAL`; removal = delete marked blocks + the config key + `src/date-experiment.ts`.
+Theory: bots concentrate on the earliest available date, so the 2nd-earliest sees less submit contention. When ON (`settings.avoidEarliestDate`, per-profile override supported) and ≥2 in-range dates exist with the 2nd within **7 working days** of the earliest, the attempt order becomes `[2nd, 1st, 3rd, ...]` — the earliest stays the immediate fallback in the same attempt (reorder, never skip). Applied at one seam — `orderDatesForAttempt` in `src/api-direct.ts` — used by the fast flow (`matchingDates`), the DOM path (`candidateDates`, both call sites), and the consular sweep (`candidateDates` in `consular-schedule.ts`, events tagged `path:'consular'`). Working days = Mon–Fri only (no holiday calendar). All edits are marked `// EXPERIMENTAL`; removal = delete marked blocks + the config key + `src/date-experiment.ts`.
 
 **Experiment logs** (`src/date-experiment.ts` → `logs/date-experiment.jsonl`, fire-and-forget, serialized write queue): `decision` events record every ordering choice — `dates`, `gapWorkingDays`, `enabled`, `wouldReorder` (baseline: fires even when the toggle is OFF, so you can see how often the rule *would* have applied), `reordered`, `order`. `outcome` events per attempted date: `pos` (position in attempt order), `promoted` (tried-first 2nd date), `result` (`booked`/`booked_retry`/`slot_gone`/`throttled`/`no_entries`/`no_eligible`/`submit_error`/`error`/`hard_error`). Join on `runId`+`attempt` (dom) or `postId`+timestamp (fast). Analysis: `findstr "promoted\":true" logs\date-experiment.jsonl` → compare booked-rate of promoted vs non-promoted attempts.
 
@@ -76,6 +76,15 @@ Theory: bots concentrate on the earliest available date, so the 2nd-earliest see
 ```
 
 Called from `logCitySelected` in `src/index.ts` — the choke point all OFC selectCity + schedule-response sites use (consular stage does not write this file). Fire-and-forget with a serialized write queue — never blocks the booking loop. Filename is `config.username` sanitized (`[^\w.-]` → `-`); profiles sharing a username share one file.
+
+### Consular Stage (post-OFC booking)
+
+`src/consular-schedule.ts` — after OFC is booked the script lands on `/en-US/schedule/`. The stage sweeps **all** configured consular cities each cycle (2–4s gap between selects), then waits `consular.cityRetrySeconds` (default 15s, per-profile `consular` block or settings `consularCityRetrySeconds`) before the next sweep. Same DOM contract as OFC (`#post_select`, `#datepicker`, `#time_select`, `#submitbtn`, `jsdata.Num`) so `ofc-schedule.ts`/`calendar.ts` helpers are reused; only the routes differ (`get-family-consular-schedule-days/-entries`, `schedule-consular-appointments-for-family`). City names have no " VAC" suffix — stripped at config merge.
+
+- **Config**: profile `consular: {city[], startDate, endDate, cityRetrySeconds}` — all optional. Empty cities → OFC cities minus ` VAC`; empty dates → **auto range = booked OFC date +2 business days → +30 working days** (India posts enforce consular ≥2 business days after OFC). OFC date source: `result.bookedDate` → checkpoint `date` → page `ofcAppointments` global (covers resume). UI: Consular section in the profile editor.
+- **Response-aware submit**: `submitConsular` arms a `schedule-consular-appointments-for-family` response listener before clicking — `HasError` verdicts return in ~1–3s instead of the old 60s nav-wait stall; `AllScheduled` → confirmation page → `sendConfirmationPdfToTelegram` (local `artifacts/confirmations/` PDF + Telegram doc).
+- **Seat eligibility**: consular `validateData` only checks `jsdata.Num` — candidates are filtered client-side to `avail >= applications.length` (page global populated by the members query).
+- **Not ported**: the OFC 3-tier direct API and wire replay are OFC-only — consular is DOM + response capture (same as the OFC DOM fallback).
 
 ### Special Windows (slot-drop timing)
 

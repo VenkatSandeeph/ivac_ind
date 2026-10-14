@@ -105,7 +105,7 @@
         <div id="pSecurityQuestions"></div>
 
         <h3>Appointment</h3>
-        <label>Cities</label>
+        <label>OFC Cities</label>
         <div class="city-checks">
           <label><input type="checkbox" value="NEW DELHI VAC" /> NEW DELHI VAC</label>
           <label><input type="checkbox" value="HYDERABAD VAC" /> HYDERABAD VAC</label>
@@ -116,11 +116,11 @@
 
         <div class="row two-cols">
           <div>
-            <label>Start Date</label>
+            <label>OFC Start Date</label>
             <input id="pStartDate" type="date" />
           </div>
           <div>
-            <label>End Date</label>
+            <label>OFC End Date</label>
             <input id="pEndDate" type="date" />
           </div>
         </div>
@@ -130,6 +130,31 @@
 
         <label>City Retry Timer (seconds)</label>
         <input id="pCityRetrySeconds" type="number" min="1" value="30" />
+
+        <h3>Consular (optional)</h3>
+        <label>Consular Cities <small>(empty = same as OFC)</small></label>
+        <div class="consular-city-checks">
+          <label><input type="checkbox" value="NEW DELHI" /> NEW DELHI</label>
+          <label><input type="checkbox" value="HYDERABAD" /> HYDERABAD</label>
+          <label><input type="checkbox" value="KOLKATA" /> KOLKATA</label>
+          <label><input type="checkbox" value="CHENNAI" /> CHENNAI</label>
+          <label><input type="checkbox" value="MUMBAI" /> MUMBAI</label>
+        </div>
+
+        <div class="row two-cols">
+          <div>
+            <label>Consular Start Date</label>
+            <input id="pConsularStartDate" type="date" />
+          </div>
+          <div>
+            <label>Consular End Date</label>
+            <input id="pConsularEndDate" type="date" />
+          </div>
+        </div>
+        <small class="hint">Empty = auto range: booked OFC date + 2 business days → +30 working days</small>
+
+        <label>Consular City Retry Timer (seconds)</label>
+        <input id="pConsularCityRetry" type="number" min="1" value="15" />
 
         <div class="row two-cols">
           <div>

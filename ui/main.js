@@ -109,6 +109,7 @@ function getDefaultConfig() {
       uiApiMismatchRetryDelayMs: 1000,
       maxDateAttempts: 3,
       preferLeastSlots: false,
+      consularCityRetrySeconds: 15,
       avoidEarliestDate: false,   // EXPERIMENTAL: 2nd-date-first ordering
       autoRotateIp: true,
       ipMode: 'auto',
@@ -142,6 +143,12 @@ function migrateLegacyConfig(raw) {
       startDate: '',
       endDate: '',
       preferredTime: null
+    },
+    consular: raw.consular || {
+      city: [],
+      startDate: '',
+      endDate: '',
+      cityRetrySeconds: 15
     },
     chromeUserDataDir: path.join(PROJECT_ROOT, 'chrome-debug-1'),
     chromeRemoteDebugPort: 9222

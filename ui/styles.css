@@ -558,18 +558,25 @@ button.small {
   gap: 12px;
 }
 
-.city-checks {
+.city-checks,
+.consular-city-checks {
   display: flex;
   flex-wrap: wrap;
   gap: 8px 14px;
 }
 
-.city-checks label {
+.city-checks label,
+.consular-city-checks label {
   display: flex;
   align-items: center;
   gap: 4px;
   font-weight: 500;
   font-size: 12px;
+}
+
+.hint {
+  color: #9aa3b2;
+  font-weight: 400;
 }
 
 .sq-row {

@@ -42,7 +42,7 @@ function getLogFile(): string {
 export type DateExperimentEvent = {
   type: 'decision' | 'outcome';
   /** Which code path produced the event */
-  path?: 'fast' | 'dom' | 'rescue';
+  path?: 'fast' | 'dom' | 'rescue' | 'consular';
   profile?: string;
   city?: string;
   runId?: string;

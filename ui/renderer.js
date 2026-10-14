@@ -288,6 +288,11 @@ function renderProfiles() {
     const cities = Array.isArray(a.city) && a.city.length > 0
       ? a.city.join(', ')
       : (typeof a.city === 'string' ? a.city : 'No city');
+    const cons = p.consular || {};
+    const consCities = Array.isArray(cons.city) && cons.city.length > 0 ? cons.city.join(', ') : '';
+    const consLine = consCities
+      ? `Consular: ${consCities}${cons.startDate && cons.endDate ? ` (${cons.startDate} → ${cons.endDate})` : ' (auto range)'}`
+      : '';
     const status = p.status || 'Stopped';
     const isRunning = p.running === true;
     const statusClass = isRunning ? 'running' : 'stopped';
@@ -305,6 +310,7 @@ function renderProfiles() {
           <div class="profile-user">${p.username || 'Unknown'}${isSelectedForLogs}</div>
           <div class="profile-detail">${cities}</div>
           <div class="profile-range">${a.startDate || ''} &rarr; ${a.endDate || ''}</div>
+          ${consLine ? `<div class="profile-range" style="color:#7ea2c9">${consLine}</div>` : ''}
           <div class="profile-status-line">Status: <b>${status}</b></div>
           <div class="profile-checkpoints">${chips}</div>
         </div>
@@ -507,6 +513,14 @@ function openModal(profile) {
     document.getElementById('pEndDate').value = a.endDate || '';
     document.getElementById('pPreferredTime').value = a.preferredTime || '';
     document.getElementById('pCityRetrySeconds').value = profile.cityRetrySeconds ?? 30;
+    const cons = profile.consular || {};
+    const consCities = Array.isArray(cons.city) ? cons.city : (cons.city ? [cons.city] : []);
+    document.querySelectorAll('.consular-city-checks input').forEach((cb) => {
+      cb.checked = consCities.includes(cb.value);
+    });
+    document.getElementById('pConsularStartDate').value = cons.startDate || '';
+    document.getElementById('pConsularEndDate').value = cons.endDate || '';
+    document.getElementById('pConsularCityRetry').value = cons.cityRetrySeconds ?? 15;
     document.getElementById('pDebugPort').value = profile.chromeRemoteDebugPort || 9222;
     document.getElementById('pUserDataDir').value = profile.chromeUserDataDir || '';
   } else {
@@ -518,10 +532,14 @@ function openModal(profile) {
     document.getElementById('pPassword').value = '';
     fillSecurityQuestions([]);
     document.querySelectorAll('.city-checks input').forEach((cb) => cb.checked = false);
+    document.querySelectorAll('.consular-city-checks input').forEach((cb) => cb.checked = false);
     document.getElementById('pStartDate').value = '';
     document.getElementById('pEndDate').value = '';
     document.getElementById('pPreferredTime').value = '';
     document.getElementById('pCityRetrySeconds').value = 30;
+    document.getElementById('pConsularStartDate').value = '';
+    document.getElementById('pConsularEndDate').value = '';
+    document.getElementById('pConsularCityRetry').value = 15;
     document.getElementById('pDebugPort').value = 9222;
     document.getElementById('pUserDataDir').value = '';
   }
@@ -576,6 +594,12 @@ function collectCities() {
   return cities;
 }
 
+function collectConsularCities() {
+  const cities = [];
+  document.querySelectorAll('.consular-city-checks input:checked').forEach((cb) => cities.push(cb.value));
+  return cities;
+}
+
 function buildProfileFromForm(onDone) {
   let id = document.getElementById('pId').value;
   let instanceIndex = parseInt(document.getElementById('pInstanceIndex').value, 10) || 0;
@@ -608,6 +632,28 @@ function buildProfileFromForm(onDone) {
     return;
   }
 
+  const consularCities = collectConsularCities();
+  const consularStartDate = document.getElementById('pConsularStartDate').value;
+  const consularEndDate = document.getElementById('pConsularEndDate').value;
+  const ccr = parseInt(document.getElementById('pConsularCityRetry').value, 10);
+  const consular = {
+    city: consularCities,
+    startDate: consularStartDate,
+    endDate: consularEndDate,
+    cityRetrySeconds: Number.isFinite(ccr) && ccr > 0 ? ccr : 15
+  };
+
+  if (consularStartDate || consularEndDate) {
+    if (!consularStartDate || !consularEndDate) {
+      showAlert('Set both consular dates, or leave both empty for the auto range.', onDone);
+      return;
+    }
+    if (new Date(consularStartDate) > new Date(consularEndDate)) {
+      showAlert('Consular start date must be earlier than or equal to consular end date.', onDone);
+      return;
+    }
+  }
+
   const securityQuestions = collectSecurityQuestions();
   if (securityQuestions.length < 3) {
     showAlert('Answer all 3 security questions.', onDone);
@@ -628,17 +674,17 @@ function buildProfileFromForm(onDone) {
       'Debug port ' + debugPort + ' is already used by ' + otherProfile.username + '. Continue anyway?',
       () => {
         // User confirmed — proceed
-        finishBuildProfile(id, instanceIndex, username, password, securityQuestions, cities, startDate, endDate, debugPort, cityRetrySeconds, onDone);
+        finishBuildProfile(id, instanceIndex, username, password, securityQuestions, cities, startDate, endDate, debugPort, cityRetrySeconds, consular, onDone);
       },
       onDone
     );
     return;
   }
 
-  finishBuildProfile(id, instanceIndex, username, password, securityQuestions, cities, startDate, endDate, debugPort, cityRetrySeconds, onDone);
+  finishBuildProfile(id, instanceIndex, username, password, securityQuestions, cities, startDate, endDate, debugPort, cityRetrySeconds, consular, onDone);
 }
 
-function finishBuildProfile(id, instanceIndex, username, password, securityQuestions, cities, startDate, endDate, debugPort, cityRetrySeconds, onDone) {
+function finishBuildProfile(id, instanceIndex, username, password, securityQuestions, cities, startDate, endDate, debugPort, cityRetrySeconds, consular, onDone) {
   const profile = {
     id: id || undefined,
     instanceIndex,
@@ -651,6 +697,7 @@ function finishBuildProfile(id, instanceIndex, username, password, securityQuest
       endDate,
       preferredTime: document.getElementById('pPreferredTime').value.trim() || null
     },
+    consular,
     chromeRemoteDebugPort: debugPort,
     chromeUserDataDir: document.getElementById('pUserDataDir').value.trim(),
     cityRetrySeconds

@@ -1,45 +1,121 @@
 import type { Page, Response } from 'patchright';
-import { info, warn, client } from './logger';
+import { info, warn, client, uiStatus } from './logger';
 import type { AutomationConfig } from './config';
 import {
   selectCity,
   getAvailableTimeCandidates,
   selectTimeCandidate,
-  submitAppointment,
-  detectNoSlots
+  detectNoSlots,
+  waitForSubmitEnabled,
+  type TimeCandidate
 } from './ofc-schedule';
 import {
   waitForCalendarReady,
   selectCalendarMonthYear,
-  getSortedDatesInRange,
   getDatesWithAllAvailable,
-  clickDateCell
+  clickDateCell,
+  type DateCell
 } from './calendar';
 import { playBeep } from './beep';
 import { recordSlotObservation } from './slot-tracker';
-import { sendConfirmationPdfToTelegram } from './confirmation';
+import { recordDateExperiment } from './date-experiment';
+import { sendConfirmationPdfToTelegram, CONFIRMATION_URL_FRAGMENT } from './confirmation';
+import { loadCheckpoint } from './checkpoint';
+import { sendSupabaseEvent } from './supabase';
+import { extractJsonFromHtml, orderDatesForAttempt } from './api-direct';
+import { addBusinessDays, parseOfcDateStr } from './utils';
 
 const CONSULAR_URL_FRAGMENT = '/en-US/schedule/';
 const citySelectSelector = '#post_select';
 
-/**
- * Installs a response listener on the consular page to capture and log the
- * page's own API calls (getScheduleDays, getScheduleEntries, submit).
- * This gives us visibility into what the page sends and receives during
- * the consular stage — critical for debugging booking failures.
- *
- * The consular page uses the same jQuery/Power Apps framework as the OFC page,
- * with the same global functions (onClickSubmit, onPostChange, jsdata, token).
- */
+// =============================================================================
+// Consular response capture
+// -----------------------------------------------------------------------------
+// Mirrors the OFC capture pattern: a single page.on('response') listener parses
+// the page's own consular API calls (consular routes never contain 'ofc').
+// Two waiter types let the sweep act on REAL server verdicts instead of fixed
+// sleeps:
+//   days waiters   — resolve with ScheduleDays.length after a city select
+//   submit waiters — resolve with the parsed submit verdict (AllScheduled/
+//                    HasError) after onClickSubmit — the fix for the old 60s
+//                    navigation-wait stall on failed submits.
+// =============================================================================
+
 let consularApiCallCount = 0;
-// Track the last schedule-days count from the API so we can short-circuit
-// the DOM flow when the API already returned 0 days (avoids waiting 30s+
-// for a calendar that will have no green dates).
+// Last schedule-days count — short-circuits the DOM flow when the API already
+// returned 0 days (avoids waiting 10s+ for a calendar with no green dates).
 let lastConsularScheduleDaysCount = -1;
+
+type ConsularSubmitVerdict = {
+  httpStatus: number;
+  allScheduled: boolean;
+  hasError: boolean;
+  errorMsg: string;
+};
+
+const consularDaysWaiters: Array<(count: number) => void> = [];
+const consularSubmitWaiters: Array<(v: ConsularSubmitVerdict) => void> = [];
+
+/**
+ * Resolves with the ScheduleDays count from the next
+ * get-family-consular-schedule-days response. Arm BEFORE selectCity — the
+ * request fires inside onPostChange during the select. Null on timeout
+ * (response never arrived — treat as "unknown", don't confuse with 0 days).
+ */
+export function waitForConsularDaysResult(timeoutMs: number): Promise<number | null> {
+  return new Promise((resolve) => {
+    let done = false;
+    const waiter = (count: number) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve(count);
+    };
+    const timer = setTimeout(() => {
+      if (done) return;
+      done = true;
+      const i = consularDaysWaiters.indexOf(waiter);
+      if (i >= 0) consularDaysWaiters.splice(i, 1);
+      resolve(null);
+    }, timeoutMs);
+    consularDaysWaiters.push(waiter);
+  });
+}
+
+/**
+ * Resolves with the parsed verdict of the next
+ * schedule-consular-appointments-for-family response. Arm BEFORE clicking
+ * submit. Null on timeout.
+ */
+function waitForConsularSubmitResult(timeoutMs: number): Promise<ConsularSubmitVerdict | null> {
+  return new Promise((resolve) => {
+    let done = false;
+    const waiter = (v: ConsularSubmitVerdict) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve(v);
+    };
+    const timer = setTimeout(() => {
+      if (done) return;
+      done = true;
+      const i = consularSubmitWaiters.indexOf(waiter);
+      if (i >= 0) consularSubmitWaiters.splice(i, 1);
+      resolve(null);
+    }, timeoutMs);
+    consularSubmitWaiters.push(waiter);
+  });
+}
+
+// Listeners are installed once per Page object — the old code re-registered
+// page.on('response') on every sweep call, stacking duplicate handlers.
+let consularCapturePage: Page | null = null;
 
 export function setupConsularResponseCapture(page: Page): void {
   consularApiCallCount = 0;
   lastConsularScheduleDaysCount = -1;
+  if (consularCapturePage === page) return;
+  consularCapturePage = page;
 
   // Log the page's own request post data for consular API calls
   page.on('request', (request) => {
@@ -73,20 +149,20 @@ export function setupConsularResponseCapture(page: Page): void {
       const shortRoute = route.replace('/api/v1/schedule-group/', '');
       info(`[CONSULAR] API call #${consularApiCallCount}: ${shortRoute} → HTTP ${response.status()}`);
 
-      // Log submit response details
-      if (route.includes('appointments-for-family') && response.ok()) {
+      // Submit response → resolve armed waiters with the verdict
+      if (route.includes('appointments-for-family')) {
         try {
           const body = await response.text().catch(() => '');
-          info(`[CONSULAR] Submit response: bodyLen=${body.length}`);
-          // Try to extract JSON
-          const jsonStart = body.indexOf('{');
-          const jsonEnd = body.lastIndexOf('}');
-          if (jsonStart >= 0 && jsonEnd > jsonStart) {
-            try {
-              const parsed = JSON.parse(body.substring(jsonStart, jsonEnd + 1));
-              info(`[CONSULAR] Submit parsed: AllScheduled=${parsed.AllScheduled}, HasError=${parsed.HasError}, RedirectStub=${parsed.RedirectStub || 'none'}, Errors=${JSON.stringify(parsed.Errors || {}).substring(0, 300)}`);
-            } catch { /* not JSON */ }
-          }
+          info(`[CONSULAR] Submit response: HTTP ${response.status()}, bodyLen=${body.length}`);
+          const parsed = extractJsonFromHtml(body);
+          const verdict: ConsularSubmitVerdict = {
+            httpStatus: response.status(),
+            allScheduled: !!parsed?.AllScheduled,
+            hasError: !!parsed?.HasError,
+            errorMsg: parsed?.Errors?.m_StringValue || ''
+          };
+          info(`[CONSULAR] Submit parsed: AllScheduled=${verdict.allScheduled}, HasError=${verdict.hasError}, Errors=${verdict.errorMsg.substring(0, 300)}`);
+          while (consularSubmitWaiters.length) consularSubmitWaiters.shift()!(verdict);
         } catch { /* ignore */ }
       }
 
@@ -94,22 +170,19 @@ export function setupConsularResponseCapture(page: Page): void {
       if ((route.includes('schedule-days') || route.includes('schedule-entries')) && response.ok()) {
         try {
           const body = await response.text().catch(() => '');
-          const jsonStart = body.indexOf('{');
-          const jsonEnd = body.lastIndexOf('}');
-          if (jsonStart >= 0 && jsonEnd > jsonStart) {
-            try {
-              const parsed = JSON.parse(body.substring(jsonStart, jsonEnd + 1));
-              if (route.includes('schedule-days')) {
-                const count = parsed.ScheduleDays?.length || 0;
-                const tokenLen = parsed.Token ? String(parsed.Token).length : 0;
-                lastConsularScheduleDaysCount = count;
-                info(`[CONSULAR] getScheduleDays: ${count} day(s), token=${tokenLen > 0 ? 'present' : 'null'}, HasError=${parsed.HasError || false}`);
-              } else if (route.includes('schedule-entries')) {
-                const count = parsed.ScheduleEntries?.length || 0;
-                const tokenLen = parsed.Token ? String(parsed.Token).length : 0;
-                info(`[CONSULAR] getScheduleEntries: ${count} entry(ies), token=${tokenLen > 0 ? 'present' : 'null'}, HasError=${parsed.HasError || false}`);
-              }
-            } catch { /* not JSON */ }
+          const parsed = extractJsonFromHtml(body);
+          if (parsed) {
+            if (route.includes('schedule-days')) {
+              const count = parsed.ScheduleDays?.length || 0;
+              const tokenLen = parsed.Token ? String(parsed.Token).length : 0;
+              lastConsularScheduleDaysCount = count;
+              info(`[CONSULAR] getScheduleDays: ${count} day(s), token=${tokenLen > 0 ? 'present' : 'null'}, HasError=${parsed.HasError || false}`);
+              while (consularDaysWaiters.length) consularDaysWaiters.shift()!(count);
+            } else if (route.includes('schedule-entries')) {
+              const count = parsed.ScheduleEntries?.length || 0;
+              const tokenLen = parsed.Token ? String(parsed.Token).length : 0;
+              info(`[CONSULAR] getScheduleEntries: ${count} entry(ies), token=${tokenLen > 0 ? 'present' : 'null'}, HasError=${parsed.HasError || false}`);
+            }
           }
         } catch { /* ignore */ }
       }
@@ -147,16 +220,178 @@ export async function waitForConsularSchedulePage(page: Page, timeoutMs = 30000)
   return false;
 }
 
+// =============================================================================
+// Consular date range resolution
+// =============================================================================
+
 /**
- * Runs the consular scheduling flow on /en-US/schedule/:
- * city -> calendar green day -> time -> submit. Reuses the OFC helpers since
- * the DOM structure (#post_select, #datepicker, #time_select, #submitbtn) is identical.
+ * Resolve the consular date range. Priority:
+ *   1. Explicit consular.startDate/endDate from config
+ *   2. Auto range from the booked OFC date: +2 business days → +30 working days
+ *      (India posts enforce consular ≥2 business days after OFC for document
+ *      forwarding; +30wd keeps the window inside the ~6-week booking horizon).
+ *      OFC date sources: caller hint → runtime checkpoint → the page's own
+ *      ofcAppointments[] global (works on resume-after-restart).
+ *   3. Fallback: the OFC configured range (today's behavior — never a crash).
  */
-export async function runConsularSchedule(page: Page, config: AutomationConfig): Promise<boolean> {
+export async function resolveConsularRange(
+  page: Page,
+  config: AutomationConfig,
+  ofcDateHint?: string
+): Promise<{ startDate: string; endDate: string; source: string }> {
+  if (config.consular.startDate && config.consular.endDate) {
+    return { startDate: config.consular.startDate, endDate: config.consular.endDate, source: 'configured' };
+  }
+
+  let ofcDate = ofcDateHint?.match(/^\d{4}-\d{2}-\d{2}/)?.[0] || null;
+
+  if (!ofcDate) {
+    const cp = loadCheckpoint();
+    if (cp?.date && /^\d{4}-\d{2}-\d{2}/.test(cp.date)) ofcDate = cp.date.substring(0, 10);
+  }
+
+  if (!ofcDate) {
+    const scraped = await page.evaluate(() => {
+      const arr = (window as any).ofcAppointments;
+      return Array.isArray(arr) && arr.length > 0 ? String(arr[0].appointmentDateStr || '') : '';
+    }).catch(() => '');
+    ofcDate = parseOfcDateStr(scraped);
+    if (ofcDate) info(`Consular range: scraped booked OFC date from page global: ${ofcDate}`);
+  }
+
+  if (ofcDate) {
+    return {
+      startDate: addBusinessDays(ofcDate, 2),
+      endDate: addBusinessDays(ofcDate, 30),
+      source: `auto from OFC ${ofcDate}`
+    };
+  }
+
+  warn('Consular range: booked OFC date unavailable — falling back to the OFC configured range.');
+  return {
+    startDate: config.appointment.startDate,
+    endDate: config.appointment.endDate,
+    source: 'ofc-range-fallback'
+  };
+}
+
+// =============================================================================
+// Consular submit — response-aware (no 60s navigation stall on failure)
+// =============================================================================
+
+/**
+ * Consular-only submit. The shared submitAppointment waits on a 60s navigation
+ * promise that only resolves at timeout when the server answers HasError (the
+ * page shows the error inline — no navigation happens). Here the verdict comes
+ * from the schedule-consular-appointments-for-family RESPONSE captured by
+ * setupConsularResponseCapture: HasError → return false in ~1-3s;
+ * AllScheduled → the page redirects to /en-US/appointment-confirmation/.
+ */
+async function submitConsular(
+  page: Page,
+  config: AutomationConfig,
+  opts?: { selected?: { time?: string; availability?: string | number } }
+): Promise<boolean> {
+  const btn = page.locator('#submitbtn');
+  try {
+    await btn.waitFor({ state: 'visible', timeout: 10000 });
+  } catch {
+    warn('Consular submit: #submitbtn not visible — skipping this slot');
+    return false;
+  }
+
+  // Arm the response listener BEFORE clicking — the submit POST can complete
+  // faster than we can subscribe after the click.
+  const verdictPromise = waitForConsularSubmitResult(45000);
+
+  // The radio click already set jsdata.Num via onSelectScheduleEntry; the
+  // framework's toggleSubmit may lag. Quick-check, then force-enable.
+  if (!(await waitForSubmitEnabled(page, 500))) {
+    info('Consular submit: button not enabled after 500ms — force-enabling');
+    await page.evaluate(() => {
+      const b = document.querySelector('#submitbtn') as HTMLInputElement | null;
+      if (b) { b.disabled = false; b.removeAttribute('disabled'); }
+    }).catch(() => null);
+  }
+
+  // Prefer the page's own onClickSubmit() — same-origin jQuery POST with all
+  // framework state. Fall back to a real button click if unavailable.
+  const usedPageFn = await page.evaluate(() => {
+    try {
+      if (typeof (window as any).onClickSubmit === 'function') {
+        (window as any).onClickSubmit();
+        return true;
+      }
+    } catch { /* fall through */ }
+    return false;
+  });
+  if (!usedPageFn) {
+    await btn.click().catch((e) => warn('Consular submit: button click failed:', e));
+  }
+
+  // Fire-and-forget telemetry — same 'submit_clicked' event the OFC
+  // submitAppointment emits, tagged with the consular stage.
+  sendSupabaseEvent('submit_clicked', {
+    username: config.username,
+    stage: 'consular',
+    selected: opts?.selected ?? null,
+    url: page.url(),
+    timestamp: new Date().toISOString()
+  }).catch(() => null);
+
+  info(`Consular submit fired (via ${usedPageFn ? 'onClickSubmit()' : 'button click'}); selected=${JSON.stringify(opts?.selected ?? null)}`);
+
+  const verdict = await verdictPromise;
+  if (verdict) {
+    if (verdict.allScheduled) {
+      info('Consular submit: AllScheduled=true — booking confirmed');
+      return true;
+    }
+    if (verdict.httpStatus === 524 || verdict.httpStatus === 429) {
+      warn(`Consular submit: HTTP ${verdict.httpStatus} — server overloaded`);
+    } else {
+      warn(`Consular submit failed: ${verdict.errorMsg || `HTTP ${verdict.httpStatus}`}`);
+    }
+    // Verdict only in the client log — raw server text stays in warn().
+    client('❌', 'Submit failed — checking for another slot…');
+    return false;
+  }
+
+  // No response within 45s — the page may still have navigated (e.g. the
+  // response raced past the listener); check the URL as the final verdict.
+  if (page.url().includes(CONFIRMATION_URL_FRAGMENT)) {
+    info('Consular submit: no response captured but landed on confirmation page');
+    return true;
+  }
+  warn('Consular submit: no response within 45s — treating as failed');
+  client('❌', 'Submit timed out — checking for another slot…');
+  return false;
+}
+
+// =============================================================================
+// Consular sweep — all configured cities, one pass per call
+// =============================================================================
+
+/**
+ * One consular sweep: for every configured consular city, select it, read the
+ * days verdict, and — when the calendar shows in-range dates — click date →
+ * time → submit immediately. Returns true only when a booking was submitted;
+ * false after a full empty sweep (the outer loop waits consularCityRetrySeconds
+ * and calls again).
+ *
+ * Reuses the OFC DOM helpers — the consular page shares the same element ids
+ * (#post_select, #datepicker, #time_select, #submitbtn) and page globals
+ * (jsdata, onPostChange, onClickSubmit). Only the API routes differ, and the
+ * consular city names carry no " VAC" suffix (already stripped at config merge).
+ */
+export async function runConsularSchedule(
+  page: Page,
+  config: AutomationConfig,
+  ofcDate?: string,
+  shouldStop?: () => boolean
+): Promise<boolean> {
   const consularStart = Date.now();
   info('Consular stage: waiting for /en-US/schedule/ to be ready');
-
-  // Install response capture for consular API calls (diagnostics)
   setupConsularResponseCapture(page);
 
   const ready = await waitForConsularSchedulePage(page, 45000);
@@ -166,198 +401,181 @@ export async function runConsularSchedule(page: Page, config: AutomationConfig):
   }
   info(`Consular stage: page ready at ${page.url()} (${Date.now() - consularStart}ms)`);
 
-  const appointmentCities = Array.isArray(config.appointment.city)
-    ? config.appointment.city
-    : [config.appointment.city];
-  const rawCity = String(appointmentCities[0] ?? '').trim();
-  if (!rawCity) {
-    warn('Consular stage: no city configured; aborting.');
+  const consularCities = config.consular.city;
+  if (consularCities.length === 0) {
+    warn('Consular stage: no consular cities configured (and OFC fallback produced none); aborting.');
     return false;
   }
-  // OFC city names carry a trailing " VAC" suffix (e.g. "NEW DELHI VAC"),
-  // but the consular dropdown lists the same cities without that suffix
-  // (e.g. "NEW DELHI"). Strip it for the consular stage.
-  const cityToSelect = rawCity.replace(/\s+VAC\s*$/i, '').trim();
-  if (cityToSelect !== rawCity) {
-    info(`Consular stage: normalized city "${rawCity}" -> "${cityToSelect}" (stripped VAC suffix)`);
-  }
 
-  // Consular stage: single attempt per call. The continuous monitoring loop
-  // (runConsularStageWithRecovery in index.ts) handles retries with backoff.
-  // Multiple attempts here just re-select the same city and get the same result,
-  // wasting 30-45s per attempt on calendar waits.
-  const maxAttempts = 1;
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    info(`Consular stage: attempt ${attempt}/${maxAttempts} (city=${cityToSelect})`);
+  const range = await resolveConsularRange(page, config, ofcDate);
+  info(`Consular stage: date range ${range.startDate} → ${range.endDate} (${range.source}); cities=[${consularCities.join(', ')}]`);
+  uiStatus(`Consular — sweeping ${consularCities.length} cit${consularCities.length === 1 ? 'y' : 'ies'}`);
 
-    // On the first attempt, wait for the page to fully load before selecting city.
-    // The consular page loads asynchronously after OFC success — the <select> appears
-    // immediately but options are populated by the Power Apps framework a few seconds later.
-    if (attempt === 1) {
-      info('Consular stage: waiting for page to fully load before city selection...');
-      await page.waitForTimeout(2000);
+  // Month/year jump target derived from the resolved range start (same trick
+  // mergeWithDefaults uses for OFC — the removed UI fields still drive the
+  // calendar-jump fallback).
+  const startParts = /^(\d{4})-(\d{2})-\d{2}/.exec(range.startDate);
+  const targetMonth = startParts ? Number(startParts[2]) : config.appointment.month;
+  const targetYear = startParts ? Number(startParts[1]) : config.appointment.year;
+
+  for (let ci = 0; ci < consularCities.length; ci++) {
+    if (shouldStop?.()) return false;
+    const city = consularCities[ci];
+
+    // Small gap between city selects inside a sweep — each fires a
+    // getScheduleDays call; back-to-back selects look like a burst.
+    if (ci > 0) {
+      const gapMs = 2000 + Math.floor(Math.random() * 2000);
+      await page.waitForTimeout(gapMs);
     }
 
+    // Arm the days waiter BEFORE the select — onPostChange fires the request
+    // synchronously inside the change dispatch.
+    const daysPromise = waitForConsularDaysResult(15000);
     try {
-      await selectCity(page, cityToSelect, appointmentCities.length > 1, config);
-      // Same client-facing selection line as the OFC stage — verdict is the
-      // API days count captured during the select (0 = no calendar dates).
-      client('🏙️', `Selected ${cityToSelect} | Calendar Visible: ${lastConsularScheduleDaysCount > 0}`);
+      await selectCity(page, city, consularCities.length > 1, config);
     } catch (err) {
-      warn('Consular stage: selectCity failed', err);
-      if (attempt < maxAttempts) {
-        info('Consular stage: waiting 3s before retry (dropdown may not have loaded)...');
-        await page.waitForTimeout(3000);
-      }
+      warn(`Consular stage: selectCity failed for ${city}:`, err);
+      continue;
+    }
+    const daysCount = await daysPromise;
+    const effectiveDays = daysCount ?? (lastConsularScheduleDaysCount >= 0 ? lastConsularScheduleDaysCount : null);
+    client('🏙️', `Selected ${city} | Calendar Visible: ${effectiveDays !== null ? effectiveDays > 0 : 'unknown'}`);
+
+    // Fast path: API returned 0 days → no green dates possible → next city.
+    if (effectiveDays === 0) {
+      info(`Consular stage: ${city} returned 0 schedule days; next city.`);
       continue;
     }
 
-    // Fast path: if the API already returned 0 schedule days, skip the DOM flow
-    // (calendar wait, month navigation, green-day scan). This saves 30-45s per
-    // check and makes consular monitoring feel continuous.
-    if (lastConsularScheduleDaysCount === 0) {
-      info('Consular stage: API returned 0 schedule days; skipping DOM calendar check.');
-      client('📅', `No consular slots for ${cityToSelect}`);
-      return false;
-    }
-
     if (await detectNoSlots(page)) {
-      warn('Consular stage: no slots error after city selection');
-      client('📅', `No consular slots for ${cityToSelect}`);
-      await page.waitForTimeout(2000);
+      warn(`Consular stage: no-slots banner after selecting ${city}; next city.`);
       continue;
     }
 
     try {
       await waitForCalendarReady(page, 10000);
-      // Calendar is visible — beep immediately (fire-and-forget, non-blocking).
-      playBeep();
+      playBeep(); // calendar visible — fire-and-forget alert
     } catch (err) {
-      warn('Consular stage: calendar did not become ready', err);
-      client('📅', `No consular slots for ${cityToSelect}`);
+      warn(`Consular stage: calendar did not become ready for ${city}:`, err);
       continue;
     }
 
     try {
-      await selectCalendarMonthYear(page, config.appointment.month, config.appointment.year);
+      await selectCalendarMonthYear(page, targetMonth, targetYear);
     } catch (err) {
-      warn('Consular stage: failed to navigate calendar to configured month/year', err);
+      warn('Consular stage: failed to navigate calendar month/year:', err);
     }
 
-    const candidateDates: { date: string; locator: any }[] = [];
-    {
-      // Single DOM evaluation — returns both all visible green dates and the
-      // in-range subset with zero extra DOM round-trips.
-      const { allAvailable, inRange } = await getDatesWithAllAvailable(
-        page,
-        config.appointment.startDate,
-        config.appointment.endDate,
-        []
-      );
-      candidateDates.push(...inRange);
+    const { allAvailable, inRange } = await getDatesWithAllAvailable(page, range.startDate, range.endDate, []);
 
-      // Log all available dates to client (even if not in range)
-      const consularAllDates = allAvailable.map(d => d.date);
-      const consularInRangeDates = inRange.map(d => d.date);
-      if (consularAllDates.length > 0) {
-        let msg = `Consular calendar visible for ${cityToSelect} — ${consularAllDates.length} date(s) available: ${consularAllDates.join(', ')}`;
-        if (consularInRangeDates.length > 0) {
-          msg += ` (${consularInRangeDates.length} in range)`;
-        } else {
-          msg += ` (0 in range)`;
-        }
-        client('📅', msg);
-      } else {
-        client('📅', `Consular calendar visible for ${cityToSelect} — no available dates on this month.`);
-      }
-
-      // Record this consular calendar observation to the local JSONL log.
-      // Fire-and-forget (non-blocking) — captures ALL visible green dates
-      // (availableDates) and the in-range subset (inRangeDates) for pattern analysis.
-      recordSlotObservation({
-        timestamp: new Date().toISOString(),
-        profile: config.username,
-        runId: `consular-${Date.now()}`,
-        stage: 'consular',
-        city: cityToSelect,
-        url: page.url(),
-        availableDates: allAvailable.map(d => d.date),
-        inRangeDates: inRange.map(d => d.date),
-        configuredRange: {
-          startDate: config.appointment.startDate,
-          endDate: config.appointment.endDate,
-          month: config.appointment.month,
-          year: config.appointment.year,
-        },
-        apiScheduleDays: lastConsularScheduleDaysCount >= 0 ? lastConsularScheduleDaysCount : 0,
-        apiScheduleEntries: 0,
-        apiAvailable: lastConsularScheduleDaysCount > 0,
-        calendarMonth: null,
-      });
+    // Client verdict + slot-tracker observation (fire-and-forget).
+    if (allAvailable.length > 0) {
+      client('📅', `Consular calendar visible for ${city} — ${allAvailable.length} date(s): ${allAvailable.map(d => d.date).join(', ')} (${inRange.length} in range)`);
+    } else {
+      client('📅', `Consular calendar visible for ${city} — no available dates this month.`);
     }
+    recordSlotObservation({
+      timestamp: new Date().toISOString(),
+      profile: config.username,
+      runId: `consular-${Date.now()}`,
+      stage: 'consular',
+      city,
+      url: page.url(),
+      availableDates: allAvailable.map(d => d.date),
+      inRangeDates: inRange.map(d => d.date),
+      configuredRange: {
+        startDate: range.startDate,
+        endDate: range.endDate,
+        month: targetMonth,
+        year: targetYear,
+      },
+      apiScheduleDays: effectiveDays ?? 0,
+      apiScheduleEntries: 0,
+      apiAvailable: (effectiveDays ?? 0) > 0,
+      calendarMonth: null,
+    });
 
-    if (candidateDates.length === 0) {
-      warn('Consular stage: no available green day within configured range');
-      client('📅', `No consular slots for ${cityToSelect}`);
+    if (inRange.length === 0) {
+      info(`Consular stage: ${city} has no dates in range; next city.`);
       continue;
     }
-    info(`Consular stage: iterating ${candidateDates.length} candidate date(s):`, candidateDates.map(d => d.date).join(', '));
 
-    for (let di = 0; di < candidateDates.length; di += 1) {
+    // EXPERIMENTAL: avoidEarliestDate ordering applies to consular too —
+    // decision + outcomes land in date-experiment.jsonl with path:'consular'.
+    const candidateDates: DateCell[] = orderDatesForAttempt(inRange, (d) => d.date, config.avoidEarliestDate, {
+      path: 'consular',
+      profile: config.username,
+      city
+    });
+
+    // Seat-eligibility floor: consular validateData() only checks jsdata.Num,
+    // so the server can reject picks with fewer slots than family members.
+    // Filter to avail >= applications.length (read from the page global the
+    // members query populated; fallback 1).
+    const memberCount = await page.evaluate(() => {
+      const a = (window as any).applications;
+      return Array.isArray(a) && a.length > 0 ? a.length : 1;
+    }).catch(() => 1);
+
+    for (let di = 0; di < candidateDates.length; di++) {
+      if (shouldStop?.()) return false;
       const dateCell = candidateDates[di];
-      // Rate-limit avoidance: pause between date attempts (2-4s), skip on first date.
+      // Rate-limit hygiene between date clicks (each fires getScheduleEntries).
       if (di > 0) {
-        const gapMs = 2000 + Math.floor(Math.random() * 2000);
-        info(`Consular stage: waiting ${gapMs}ms before trying next date (rate-limit avoidance)`);
-        await page.waitForTimeout(gapMs);
+        await page.waitForTimeout(2000 + Math.floor(Math.random() * 2000));
       }
       try {
         await clickDateCell(page, dateCell);
       } catch (err) {
-        warn(`Consular stage: could not click date ${dateCell.date}, skipping:`, err);
+        warn(`Consular stage: could not click date ${dateCell.date}:`, err);
+        recordDateExperiment({ type: 'outcome', path: 'consular', profile: config.username, city, date: dateCell.date, pos: di, result: 'error' });
         continue;
       }
 
-      const timeCandidates = await getAvailableTimeCandidates(page, config.appointment.preferredTime ?? null, config.preferLeastSlots);
-      if (timeCandidates.length === 0) {
-        warn(`Consular stage: no time slots for ${dateCell.date}; moving to next date`);
+      const timeCandidates: TimeCandidate[] = await getAvailableTimeCandidates(
+        page,
+        config.appointment.preferredTime ?? null,
+        config.preferLeastSlots
+      );
+      const eligible = timeCandidates.filter((c) => c.avail >= memberCount);
+      if (eligible.length === 0) {
+        warn(`Consular stage: no seat-eligible time slots for ${dateCell.date} (need ${memberCount}); next date.`);
+        recordDateExperiment({ type: 'outcome', path: 'consular', profile: config.username, city, date: dateCell.date, pos: di, result: 'no_eligible' });
         continue;
       }
 
-      // Adaptive enable-timeout: 20s only when there is exactly 1 date + 1 time; 5s otherwise.
-      const singleOption = candidateDates.length === 1 && timeCandidates.length === 1;
-      const enableTimeoutMs = singleOption ? 20000 : 5000;
-      info(`Consular stage: submit-enable timeout=${enableTimeoutMs}ms (singleOption=${singleOption})`);
-
-      for (let ti = 0; ti < timeCandidates.length; ti += 1) {
-        const cand = timeCandidates[ti];
-        const submitStart = Date.now();
-        info(`Consular stage: date ${dateCell.date} time ${ti + 1}/${timeCandidates.length} '${cand.time}' avail=${cand.avail}`);
-        await selectTimeCandidate(page, cand);
-        const submitted = await submitAppointment(page, config, {
-          enableTimeoutMs,
+      for (const cand of eligible) {
+        if (shouldStop?.()) return false;
+        info(`Consular stage: ${city} ${dateCell.date} '${cand.time}' avail=${cand.avail} — submitting`);
+        try {
+          await selectTimeCandidate(page, cand);
+        } catch (err) {
+          warn(`Consular stage: time select failed for '${cand.time}':`, err);
+          continue;
+        }
+        const submitted = await submitConsular(page, config, {
           selected: { time: cand.time, availability: cand.avail }
         });
-        if (submitted === true) {
-          info(`Consular stage: submit succeeded (${Date.now() - submitStart}ms, total ${Date.now() - consularStart}ms)`);
-          client('✅', `CONSULAR BOOKED! Date=${dateCell.date} Time=${cand.time}`);
-          // The site navigates to /en-US/appointment-confirmation/ after a
-          // successful consular submit. Capture that page as a PDF (CDP
-          // printToPDF — same output as the page's Print button) and send it
-          // to Telegram. Awaited because the process exits after booking; the
-          // helper is bounded and never throws.
+        if (submitted) {
+          info(`Consular stage: submit succeeded (${Date.now() - consularStart}ms total)`);
+          client('✅', `CONSULAR BOOKED! ${city} — Date=${dateCell.date} Time=${cand.time}`);
+          recordDateExperiment({ type: 'outcome', path: 'consular', profile: config.username, city, date: dateCell.date, pos: di, result: 'booked' });
+          // Site lands on /en-US/appointment-confirmation/ — capture that page
+          // as a PDF (CDP printToPDF, same output as the Print button), save a
+          // local copy and send it to Telegram. Awaited because the process
+          // exits after booking; the helper is bounded and never throws.
           await sendConfirmationPdfToTelegram(page, config);
           return true;
         }
-        warn(`Consular stage: submit not enabled/clicked for time '${cand.time}' (${Date.now() - submitStart}ms); trying next time`);
+        recordDateExperiment({ type: 'outcome', path: 'consular', profile: config.username, city, date: dateCell.date, pos: di, result: 'submit_error' });
+        // Failed submit → try the next eligible time on the same date.
       }
 
-      info(`Consular stage: exhausted times on ${dateCell.date}; moving to next date`);
+      info(`Consular stage: exhausted times on ${dateCell.date}; next date.`);
     }
-
-    warn('Consular stage: all candidate dates/times exhausted this attempt');
   }
 
-  warn('Consular stage: exhausted attempts without success');
+  info(`Consular stage: sweep of ${consularCities.length} cit${consularCities.length === 1 ? 'y' : 'ies'} complete — nothing bookable (${Date.now() - consularStart}ms)`);
   return false;
 }

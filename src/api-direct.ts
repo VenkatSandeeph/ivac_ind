@@ -622,7 +622,7 @@ async function extractPageContext(page: Page): Promise<PageContext | null> {
  * The Content-Type is text/html, and JSON.parse() fails on the raw response.
  * This function extracts the JSON object from the mixed HTML/JSON content.
  */
-function extractJsonFromHtml(text: string): any | null {
+export function extractJsonFromHtml(text: string): any | null {
   if (!text) return null;
   // Try direct parse first (in case it's pure JSON)
   try { return JSON.parse(text); } catch { /* not pure JSON */ }

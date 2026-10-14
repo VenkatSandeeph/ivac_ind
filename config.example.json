@@ -23,6 +23,12 @@
     "endDate": "2026-09-30",
     "preferredTime": null
   },
+  "consular": {
+    "city": ["NEW DELHI"],
+    "startDate": "",
+    "endDate": "",
+    "cityRetrySeconds": 15
+  },
   "chromeExecutable": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
   "chromeUserDataDir": "C:\\temp\\chrome-debug",
   "chromeRemoteDebugPort": 9222,
