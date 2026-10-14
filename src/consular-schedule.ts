@@ -273,8 +273,15 @@ export function setupConsularResponseCapture(page: Page): void {
 export async function isOnConsularSchedulePage(page: Page): Promise<boolean> {
   const url = page.url();
   if (!url.includes(CONSULAR_URL_FRAGMENT)) return false;
-  const hasSelect = await page.locator(citySelectSelector).count().then((c) => c > 0).catch(() => false);
-  return hasSelect;
+  // The #post_select element renders before queryConsularPosts fills it —
+  // require at least one option with a non-empty value (placeholder options
+  // carry value=''), otherwise selectCity throws "not found in the dropdown".
+  const populated = await page.evaluate(() => {
+    const s = document.querySelector('#post_select') as HTMLSelectElement | null;
+    if (!s) return false;
+    return Array.from(s.options).some((o) => !!o.value);
+  }).catch(() => false);
+  return populated;
 }
 
 /**

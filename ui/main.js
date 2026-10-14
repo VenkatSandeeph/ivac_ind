@@ -204,7 +204,9 @@ function appendLog(profileId, text) {
   } else if (str.includes('Cloudflare') || str.includes('cloudflare') || str.includes('verification') || str.includes('Human verification')) {
     rec.status = 'Cloudflare';
   } else if (str.includes('Consular') || str.includes('consular')) {
-    rec.status = 'Consular';
+    // Don't downgrade a richer marker status (e.g. 'Consular — OFC: ...') —
+    // ordinary log chatter mentioning "consular" arrives between markers.
+    if (!(rec.status || '').startsWith('Consular')) rec.status = 'Consular';
   } else if (str.includes('schedule') || str.includes('Schedule') || str.includes('OFC')) {
     rec.status = 'Schedule page';
   } else if (str.includes('Home') || str.includes('home page') || str.includes('Dashboard')) {
