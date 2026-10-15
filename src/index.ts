@@ -35,6 +35,7 @@ import {
 } from './calendar';
 import { waitForScheduleResponse } from './schedule-api';
 import { runConsularSchedule } from './consular-schedule';
+import { runConsularWireLoop } from './consular-wire';
 import { sendSupabaseEvent } from './supabase';
 import { sendOfcBookedNotification, sendTelegramMessage } from './telegram';
 import { loadCheckpoint, saveCheckpoint, clearCheckpoint } from './checkpoint';
@@ -358,11 +359,12 @@ async function runConsularStageWithRecovery(
       // recovery, which would otherwise poll the formless page forever.
       const suppressed = await getSuppressedScheduleState(page);
       if (suppressed) {
-        const stopped = await handleScheduleFormSuppression(page, config, suppressed, 'consular monitoring');
-        if (stopped) {
-          info('Stop signal received during suppressed-form cooldown; exiting consular stage.');
+        const verdict = await handleScheduleFormSuppression(page, config, suppressed, 'consular monitoring');
+        if (verdict === 'stopped') {
+          info('Stop signal received during suppressed-form handling; exiting consular stage.');
           return false;
         }
+        if (verdict === 'booked') return true;
         continue;
       }
       info('Consular monitoring: not on consular page; running resumeFromCurrentPage...');
@@ -1190,21 +1192,43 @@ async function reenterScheduleViaHome(page: any, config: AutomationConfig): Prom
   }
 }
 
+type SuppressionVerdict = 'continue' | 'stopped' | 'booked';
+
 /**
- * Handle a form-suppressed schedule page. First detection per episode: one
- * immediate re-entry in case the render was stale. Persistent suppression:
- * Telegram notify once, cool down 15min, then re-enter from home — the site's
- * own remediation is "log out, wait 1+ hours, re-enter from the home page".
- * Never rotates IP — this state is account-scoped, not IP-scoped.
- * Returns true when the stop signal fired during the cooldown.
+ * Handle a form-suppressed schedule page.
+ *
+ * Consular stage → the wire sweep (consular-wire.ts) replaces the DOM sweep
+ * entirely: the session's API endpoints answer normally even when the form
+ * markup is withheld, so the bot keeps booking without burning page views or
+ * reloading the skeleton. No Telegram alert — the sweep looks identical to
+ * the normal consular flow in the client log.
+ *
+ * OFC stage → no consular wire path applies; keep the original remediation:
+ * one immediate re-entry, then Telegram notify once + 15min cooldown between
+ * re-entries. Never rotates IP — suppression is account-scoped, not IP-scoped.
  */
 async function handleScheduleFormSuppression(
   page: any,
   config: AutomationConfig,
   suppressed: SuppressedScheduleState,
   context: string
-): Promise<boolean> {
+): Promise<SuppressionVerdict> {
   const shortMsg = suppressed.message.replace(/\s+/g, ' ').substring(0, 160);
+
+  if (suppressed.stage === 'consular') {
+    warn(`[SUPPRESSED] consular schedule page rendered without a form (${context}). Page says: "${shortMsg}". Switching to the wire-mode consular sweep.`);
+    const wire = await runConsularWireLoop(page, config, checkStopSignal, () => consumeStaticRotateFlag(config));
+    if (wire === 'stopped') return 'stopped';
+    if (wire === 'booked') return 'booked';
+    if (wire === 'locked') {
+      warn('[SUPPRESSED] consular wire submit hit an account-level scheduling lock (PSE0612/PSE0602) — cooling down 15min.');
+      uiStatus('Scheduling locked (consular) — retry in 15 min');
+      if (await sleepWithStopSignal(SCHEDULE_SUPPRESSION_COOLDOWN_MS)) return 'stopped';
+    }
+    // 'exit' — form restored, page left the site, or CF throttled: the outer
+    // loop re-classifies and picks the right flow.
+    return 'continue';
+  }
 
   if (!scheduleSuppressionReentered) {
     scheduleSuppressionReentered = true;
@@ -1212,7 +1236,7 @@ async function handleScheduleFormSuppression(
     client('⚠️', 'Schedule page has no form — re-entering via home page…');
     uiStatus('Schedule form suppressed — re-entering via home');
     await reenterScheduleViaHome(page, config);
-    return false;
+    return 'continue';
   }
 
   if (!scheduleSuppressionNotified) {
@@ -1225,9 +1249,9 @@ async function handleScheduleFormSuppression(
   warn(`[SUPPRESSED] ${suppressed.stage} form still withheld after re-entry (${context}). Cooling down 15min before next attempt.`);
   client('⏸️', `Scheduling locked by site (${suppressed.stage}) — retrying in 15 min…`);
   uiStatus(`Scheduling locked (${suppressed.stage}) — retry in 15 min`);
-  if (await sleepWithStopSignal(SCHEDULE_SUPPRESSION_COOLDOWN_MS)) return true;
+  if (await sleepWithStopSignal(SCHEDULE_SUPPRESSION_COOLDOWN_MS)) return 'stopped';
   await reenterScheduleViaHome(page, config);
-  return false;
+  return 'continue';
 }
 
 async function isInternalPage(page: any) {
@@ -1619,8 +1643,38 @@ async function main() {
         // recovery, which would otherwise poll the formless page forever.
         const suppressed = await getSuppressedScheduleState(page);
         if (suppressed) {
-          const stopped = await handleScheduleFormSuppression(page, config, suppressed, 'health check');
-          if (stopped) await gracefulExit(config);
+          const verdict = await handleScheduleFormSuppression(page, config, suppressed, 'health check');
+          if (verdict === 'stopped') await gracefulExit(config);
+          if (verdict === 'booked') {
+            booked = true;
+            saveCheckpoint({
+              runId,
+              state: 'booked',
+              attempt,
+              city: appointmentCities[cityIndex],
+              url: page.url(),
+              timestamp: new Date().toISOString()
+            });
+            sendMajorEventAlert(config, 'appointment_submitted', {
+              runId,
+              attempt,
+              city: appointmentCities[cityIndex],
+              url: page.url(),
+              stage: 'consular_only'
+            });
+            info('Consular wire-mode booking succeeded! Full appointment booked.');
+            client('✅', 'CONSULAR BOOKED! Full appointment complete!');
+            sendSupabaseEvent('consular_submitted', {
+              username: config.username,
+              runId,
+              attempt,
+              city: appointmentCities[cityIndex],
+              url: page.url(),
+              stage: 'consular_only',
+              timestamp: new Date().toISOString()
+            }).catch(() => null);
+            break;
+          }
           continue;
         }
         info('Not on any schedule page at start of attempt. Detecting state and recovering...');

@@ -18,10 +18,9 @@ import {
 } from './calendar';
 import { playBeep } from './beep';
 import { recordSlotObservation } from './slot-tracker';
-import { recordDateExperiment } from './date-experiment';
 import { sendConfirmationPdfToTelegram, CONFIRMATION_URL_FRAGMENT } from './confirmation';
 import { sendSupabaseEvent } from './supabase';
-import { extractJsonFromHtml, orderDatesForAttempt } from './api-direct';
+import { extractJsonFromHtml } from './api-direct';
 import { parseOfcDateStr } from './utils';
 
 const CONSULAR_URL_FRAGMENT = '/en-US/schedule/';
@@ -89,7 +88,7 @@ async function evalInMainWorld(page: Page, expression: string): Promise<unknown>
 }
 
 /** Scrape ofcAppointments once; subsequent calls return the cache. */
-async function scrapeOfcAppointment(page: Page): Promise<OfcAppointmentInfo | null> {
+export async function scrapeOfcAppointment(page: Page): Promise<OfcAppointmentInfo | null> {
   if (ofcAppointmentCache) return ofcAppointmentCache;
   const value = await evalInMainWorld(page,
     `(function(){ var a = window.ofcAppointments; return (Array.isArray(a) && a.length > 0 && a[0].appointmentDateStr) ? String(a[0].appointmentDateStr) : ''; })()`
@@ -117,7 +116,7 @@ function formatOfcDisplayLabel(raw: string): string {
 }
 
 /** The consular-stage status label — includes the booked OFC date/time when known. */
-function consularStatusLabel(): string {
+export function consularStatusLabel(): string {
   if (!ofcAppointmentCache) return 'Consular';
   return `Consular — OFC: ${formatOfcDisplayLabel(ofcAppointmentCache.raw)}`;
 }
@@ -556,13 +555,9 @@ export async function runConsularSchedule(
       continue;
     }
 
-    // EXPERIMENTAL: avoidEarliestDate ordering applies to consular too —
-    // decision + outcomes land in date-experiment.jsonl with path:'consular'.
-    const candidateDates: DateCell[] = orderDatesForAttempt(inRange, (d) => d.date, config.avoidEarliestDate, {
-      path: 'consular',
-      profile: config.username,
-      city
-    });
+    // Earliest-first order — the avoidEarliestDate experiment is OFC-only
+    // (consular has no contention signal worth reordering for).
+    const candidateDates: DateCell[] = inRange;
 
     // Seat-eligibility floor: consular validateData() only checks jsdata.Num,
     // so the server can reject picks with fewer slots than family members.
@@ -583,7 +578,6 @@ export async function runConsularSchedule(
         await clickDateCell(page, dateCell);
       } catch (err) {
         warn(`Consular stage: could not click date ${dateCell.date}:`, err);
-        recordDateExperiment({ type: 'outcome', path: 'consular', profile: config.username, city, date: dateCell.date, pos: di, result: 'error' });
         continue;
       }
 
@@ -595,7 +589,6 @@ export async function runConsularSchedule(
       const eligible = timeCandidates.filter((c) => c.avail >= memberCount);
       if (eligible.length === 0) {
         warn(`Consular stage: no seat-eligible time slots for ${dateCell.date} (need ${memberCount}); next date.`);
-        recordDateExperiment({ type: 'outcome', path: 'consular', profile: config.username, city, date: dateCell.date, pos: di, result: 'no_eligible' });
         continue;
       }
 
@@ -614,7 +607,6 @@ export async function runConsularSchedule(
         if (submitted) {
           info(`Consular stage: submit succeeded (${Date.now() - consularStart}ms total)`);
           client('✅', `CONSULAR BOOKED! ${city} — Date=${dateCell.date} Time=${cand.time}`);
-          recordDateExperiment({ type: 'outcome', path: 'consular', profile: config.username, city, date: dateCell.date, pos: di, result: 'booked' });
           // Site lands on /en-US/appointment-confirmation/ — capture that page
           // as a PDF (CDP printToPDF, same output as the Print button), save a
           // local copy and send it to Telegram. Awaited because the process
@@ -622,7 +614,6 @@ export async function runConsularSchedule(
           await sendConfirmationPdfToTelegram(page, config);
           return true;
         }
-        recordDateExperiment({ type: 'outcome', path: 'consular', profile: config.username, city, date: dateCell.date, pos: di, result: 'submit_error' });
         // Failed submit → try the next eligible time on the same date.
       }
 
