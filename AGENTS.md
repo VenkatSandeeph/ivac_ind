@@ -87,6 +87,14 @@ Called from `logCitySelected` in `src/index.ts` — the choke point all OFC sele
 - **Seat eligibility**: consular `validateData` only checks `jsdata.Num` — candidates are filtered client-side to `avail >= applications.length` (page global populated by the members query).
 - **Not ported**: the OFC 3-tier direct API and wire replay are OFC-only — consular is DOM + response capture (same as the OFC DOM fallback).
 
+### Form-Suppressed Schedule Page (server-side scheduling lock)
+
+Observed live (Oct 15, `?reschedule=true` consular page, account with "ONE rescheduling attempt remaining"): the site can serve the schedule page **skeleton only** — `#main_container` holds just `#error_row` (the warning); `#page_form`, `#post_select`, `#datepicker`, `#time_select`, `#submitbtn` are never emitted. Server-side decision — all page JS still runs (posts + family-members queries fire and return 200) but every jQuery selector no-ops. The warning itself is NOT the cause — the same warning coexists with a fully rendered form on the OFC reschedule page of the same account. The page-view limiter (`schedulePageViews` → `canViewPage:false` → `$('#page_form').remove()`) is a related mechanism but was ruled out in the observed case.
+
+Handling (`src/index.ts`, `getSuppressedScheduleState` + `handleScheduleFormSuppression`): detect = schedule URL + `readyState complete` + `#main_container` present + `#page_form`/`#post_select` absent + non-empty `#error_row`, double-probed ~2s apart. First detection → one re-entry via home → Reschedule link; persistent → Telegram once per episode + 15-min cooldown → re-enter → repeat. Flags reset when a form is detected. **Never rotates IP** — the lock is account-scoped. Wired at the two seams that previously deadlocked: consular monitoring (`!onConsular`) and the OFC health check (`!onOfc`). `resumeFromCurrentPage` untouched — startup on a suppressed page self-corrects after its ~60s poll exhausts.
+
+Known adjacent gap (pre-existing): the consular monitoring loop only accepts the consular page — if a re-entry lands on a *working* OFC schedule page, it spins at 10s intervals rather than returning to the OFC loop.
+
 ### Special Windows (slot-drop timing)
 
 `SPECIAL_WINDOW_TRIGGERS_SEC` in `src/index.ts` — observed slot-drop trigger times at **second :58** of minutes **12, 25, 29, 36, 49, 55, 59**, every hour, on the **local system clock** (fires when the machine's time hits `HH:MM:58`; NOT server UTC).

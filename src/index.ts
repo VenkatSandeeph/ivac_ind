@@ -36,7 +36,7 @@ import {
 import { waitForScheduleResponse } from './schedule-api';
 import { runConsularSchedule } from './consular-schedule';
 import { sendSupabaseEvent } from './supabase';
-import { sendOfcBookedNotification } from './telegram';
+import { sendOfcBookedNotification, sendTelegramMessage } from './telegram';
 import { loadCheckpoint, saveCheckpoint, clearCheckpoint } from './checkpoint';
 import { info, warn, error, client, backendError, uiStatus } from './logger';
 import { pageHasSelector, isLoginPage, waitForPortOpen, waitForPortClosed } from './utils';
@@ -351,7 +351,20 @@ async function runConsularStageWithRecovery(
 
     // Ensure we're on the consular schedule page
     const onConsular = await isConsularSchedulePage(page).catch(() => false);
+    if (onConsular) resetScheduleSuppressionFlags();
     if (!onConsular) {
+      // Server withheld the scheduling form (account-level lock — skeleton
+      // page with only #error_row, no #page_form). Handle before the generic
+      // recovery, which would otherwise poll the formless page forever.
+      const suppressed = await getSuppressedScheduleState(page);
+      if (suppressed) {
+        const stopped = await handleScheduleFormSuppression(page, config, suppressed, 'consular monitoring');
+        if (stopped) {
+          info('Stop signal received during suppressed-form cooldown; exiting consular stage.');
+          return false;
+        }
+        continue;
+      }
       info('Consular monitoring: not on consular page; running resumeFromCurrentPage...');
       try {
         await resumeFromCurrentPage(page, config);
@@ -1110,6 +1123,113 @@ async function isSchedulePage(page: any) {
   return isOfcSchedulePage(page);
 }
 
+// =============================================================================
+// Form-suppressed schedule page (server-side scheduling lock)
+// -----------------------------------------------------------------------------
+// The site sometimes serves the schedule page skeleton WITHOUT the form:
+// #main_container holds only #error_row (e.g. the "ONE rescheduling attempt
+// remaining" warning / limit messages) — #page_form, #post_select, #datepicker
+// are never emitted. Server-side decision: all page JS still runs (posts and
+// family-members queries fire and return), but every jQuery selector no-ops.
+// Our page classifiers require #post_select, so this page reads as "relevant
+// but not recognized" and resumeFromCurrentPage polls forever — an infinite
+// stuck loop that also burns schedule-page views. The detector below only
+// fires when the form is verifiably absent on a fully loaded schedule page,
+// so healthy flows are never affected.
+// =============================================================================
+
+type SuppressedScheduleState = { stage: 'ofc' | 'consular'; message: string };
+
+async function probeSuppressedSchedulePage(page: any): Promise<string | null> {
+  const url = page.url();
+  if (!urlIsOfcSchedule(url) && !urlIsConsularSchedule(url)) return null;
+  const message = await page.evaluate(() => {
+    if (document.readyState !== 'complete') return null;
+    if (!document.querySelector('#main_container')) return null;
+    if (document.querySelector('#page_form') || document.querySelector('#post_select')) return null;
+    const er = document.querySelector('#error_row') as HTMLElement | null;
+    const text = ((er && er.innerText) || '').trim();
+    return text || null;
+  }).catch(() => null);
+  return typeof message === 'string' ? message.substring(0, 300) : null;
+}
+
+/** Double-probe ~2s apart so a mid-load schedule page is never misclassified. */
+async function getSuppressedScheduleState(page: any): Promise<SuppressedScheduleState | null> {
+  const url = page.url();
+  const stage: 'ofc' | 'consular' | null = urlIsOfcSchedule(url) ? 'ofc' : urlIsConsularSchedule(url) ? 'consular' : null;
+  if (!stage) return null;
+  if (!(await probeSuppressedSchedulePage(page))) return null;
+  await page.waitForTimeout(2000).catch(() => null);
+  const message = await probeSuppressedSchedulePage(page);
+  return message ? { stage, message } : null;
+}
+
+// Episode flags — one immediate re-entry + one Telegram notification per
+// suppression episode; both reset the moment a real form is detected again.
+let scheduleSuppressionReentered = false;
+let scheduleSuppressionNotified = false;
+
+function resetScheduleSuppressionFlags() {
+  scheduleSuppressionReentered = false;
+  scheduleSuppressionNotified = false;
+}
+
+const SCHEDULE_SUPPRESSION_COOLDOWN_MS = 15 * 60 * 1000;
+
+/** Re-enter the schedule flow the canonical way: home page -> schedule/reschedule link. */
+async function reenterScheduleViaHome(page: any, config: AutomationConfig): Promise<void> {
+  try {
+    await page.goto(getHomePageUrl(config.scheduleUrl), { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null);
+    await waitForHumanVerificationIfNeeded(page, config.cloudflareWaitMs, config.autoSolveCloudflare, isAborted).catch(() => null);
+    await navigateToOfcSchedule(page, config.scheduleUrl);
+  } catch (e) {
+    // navigateToOfcSchedule waits for #post_select — on a still-suppressed
+    // landing that wait times out; harmless, the next loop re-classifies.
+    info(`[SUPPRESSED] Re-entry ended at ${page.url()} — ${e instanceof Error ? e.message : e}`);
+  }
+}
+
+/**
+ * Handle a form-suppressed schedule page. First detection per episode: one
+ * immediate re-entry in case the render was stale. Persistent suppression:
+ * Telegram notify once, cool down 15min, then re-enter from home — the site's
+ * own remediation is "log out, wait 1+ hours, re-enter from the home page".
+ * Never rotates IP — this state is account-scoped, not IP-scoped.
+ * Returns true when the stop signal fired during the cooldown.
+ */
+async function handleScheduleFormSuppression(
+  page: any,
+  config: AutomationConfig,
+  suppressed: SuppressedScheduleState,
+  context: string
+): Promise<boolean> {
+  const shortMsg = suppressed.message.replace(/\s+/g, ' ').substring(0, 160);
+
+  if (!scheduleSuppressionReentered) {
+    scheduleSuppressionReentered = true;
+    warn(`[SUPPRESSED] ${suppressed.stage} schedule page rendered without a form (${context}). Page says: "${shortMsg}". Re-entering once via home page.`);
+    client('⚠️', 'Schedule page has no form — re-entering via home page…');
+    uiStatus('Schedule form suppressed — re-entering via home');
+    await reenterScheduleViaHome(page, config);
+    return false;
+  }
+
+  if (!scheduleSuppressionNotified) {
+    scheduleSuppressionNotified = true;
+    sendTelegramMessage(
+      `⚠️ IVAC ${config.username}: schedule form suppressed by the site (${suppressed.stage} stage). ` +
+      `Page message: "${shortMsg}". Cooling down 15min between re-entry attempts — scheduling may be locked for this account.`
+    ).catch(() => null);
+  }
+  warn(`[SUPPRESSED] ${suppressed.stage} form still withheld after re-entry (${context}). Cooling down 15min before next attempt.`);
+  client('⏸️', `Scheduling locked by site (${suppressed.stage}) — retrying in 15 min…`);
+  uiStatus(`Scheduling locked (${suppressed.stage}) — retry in 15 min`);
+  if (await sleepWithStopSignal(SCHEDULE_SUPPRESSION_COOLDOWN_MS)) return true;
+  await reenterScheduleViaHome(page, config);
+  return false;
+}
+
 async function isInternalPage(page: any) {
   const url = page.url();
   return (
@@ -1438,6 +1558,7 @@ async function main() {
       const onOfc = await isOfcSchedulePage(page).catch(() => false);
       const onConsular = !onOfc && (await isConsularSchedulePage(page).catch(() => false));
       info(`Page-type check: url=${urlNow} onOfc=${onOfc} onConsular=${onConsular}`);
+      if (onOfc || onConsular) resetScheduleSuppressionFlags();
 
       // Check for hard block pages (Access limitation / Cloudflare IP block).
       // These require IP rotation + page refresh to recover — they cannot be
@@ -1493,6 +1614,15 @@ async function main() {
         }
         break;
       } else if (!onOfc) {
+        // Server withheld the scheduling form (account-level lock — skeleton
+        // page with only #error_row, no #page_form). Handle before the generic
+        // recovery, which would otherwise poll the formless page forever.
+        const suppressed = await getSuppressedScheduleState(page);
+        if (suppressed) {
+          const stopped = await handleScheduleFormSuppression(page, config, suppressed, 'health check');
+          if (stopped) await gracefulExit(config);
+          continue;
+        }
         info('Not on any schedule page at start of attempt. Detecting state and recovering...');
         await resumeFromCurrentPage(page, config);
         const nowOfc = await isOfcSchedulePage(page).catch(() => false);
