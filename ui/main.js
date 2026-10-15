@@ -203,10 +203,14 @@ function appendLog(profileId, text) {
     rec.status = 'Login page';
   } else if (str.includes('Cloudflare') || str.includes('cloudflare') || str.includes('verification') || str.includes('Human verification')) {
     rec.status = 'Cloudflare';
+  } else if (str.includes('[STOPPED]') || str.includes('Script stopped')) {
+    rec.status = 'Stopped';
+  } else if ((rec.status || '').startsWith('Consular —')) {
+    // Explicit marker label (e.g. 'Consular — OFC: 12/1/2026 10:00 AM') — don't
+    // let cosmetic keyword guesses ('Schedule page', 'Consular', 'Submitting')
+    // downgrade it between markers. Critical states above still override.
   } else if (str.includes('Consular') || str.includes('consular')) {
-    // Don't downgrade a richer marker status (e.g. 'Consular — OFC: ...') —
-    // ordinary log chatter mentioning "consular" arrives between markers.
-    if (!(rec.status || '').startsWith('Consular')) rec.status = 'Consular';
+    rec.status = 'Consular';
   } else if (str.includes('schedule') || str.includes('Schedule') || str.includes('OFC')) {
     rec.status = 'Schedule page';
   } else if (str.includes('Home') || str.includes('home page') || str.includes('Dashboard')) {
@@ -219,8 +223,6 @@ function appendLog(profileId, text) {
     rec.status = 'Time selected';
   } else if (str.includes('submit') || str.includes('Submit') || str.includes('booked') || str.includes('Booked')) {
     rec.status = 'Submitting';
-  } else if (str.includes('[STOPPED]') || str.includes('Script stopped')) {
-    rec.status = 'Stopped';
   } else if (str.includes('Starting') || str.includes('starting')) {
     rec.status = 'Starting';
   }

@@ -98,7 +98,9 @@ Priority order inside `PageInfo.state`: verify → queue → rateLimited → blo
 8. Outcomes: OFC `booked` → `Telegram.sendOfcBooked` + beep + `Checkpoint.save("ofc-booked")` → **returns to runLoop which continues into the consular stage**; consular `booked` → `Telegram.sendConsularBooked` + stop; `taken`/`HasError` → next time slot; `left` → outer loop resumes.
 9. Next city after `computeRetryDelay` — full desktop special-window port: `:58`-of-minute triggers **12, 25, 29, 36, 49, 55, 59** on the **local system clock**, `preciseSleepUntilSpecialWindow` (~ms precision), and `beginSpecialSweep` multi-city sweep (all desired cities once each, 2-4s gaps, 60s-per-city cap, `abortSpecialSweep` on a wedged response).
 
-After OFC success the engine waits for the site redirect to `/en-US/schedule/` (up to 2min — never re-runs the OFC cycle, avoiding double-book). The first CONSULAR detection per run fires `Telegram.sendConsularStage` once, then the same DOM cycle books consular slots. A direct-API booking navigates the page to the consular URL itself (a raw XHR submit never triggers the site redirect).
+After OFC success the engine waits for the site redirect to `/en-US/schedule/` (up to 2min — never re-runs the OFC cycle, avoiding double-book). The first CONSULAR detection per run fires `Telegram.sendConsularStage` once, then the same DOM cycle books consular slots.
+
+**Consular stage (desktop `consular-schedule.ts` parity):** dedicated `profile.consular` config — `cities` (empty → OFC cities minus " VAC"), `startDate`/`endDate` (empty → **earliest available**, unbounded — the site never renders dates earlier than the booked OFC appointment), `cityRetrySeconds` (default 15). Cadence: all consular cities swept per pass with 2–4s gaps; the retry delay applies only between full sweeps. Status shows the booked OFC appointment scraped once from `window.ofcAppointments[0].appointmentDateStr` (`Consular — OFC: <date>`). Same DOM contract as OFC (`#post_select`, `#time_select`, `#submitbtn`, `jsdata.Num`); consular routes land in the same response channels, so the submit verdict stays response-aware. On consular success → `confirmationPdfFlow()` (below).
 
 `dryRun=true` never clicks the final submit (JS still performs date/time selection).
 
@@ -110,11 +112,15 @@ After OFC success the engine waits for the site redirect to `/en-US/schedule/` (
 2. **Revolving tap loop (~90s)** — while the challenge is live, `Js.CF_BOX` is re-evaluated each poll and the *current* widget coords are tapped every ~1.5–2s. The widget re-renders/revolves mid-solve ("Cannot find Widget cf-chl-widget-*" console churn); per-poll re-detection survives that.
 3. **Pass verdicts** — `cf-turnstile-response`/`cf_challenge_response` token populated (definitive), `cfWaiting` text (solved, origin answering — outer loop waits), or verify markers absent >4s (debounced against re-render gaps).
 
-`Js.CF_BOX` finds the Turnstile host — `#cf-turnstile`, `iframe[src*="cloudflare.com"]`, or the sized ancestor of the hidden `cf-chl-widget-*` input — `scrollIntoView`s it, and returns its `getBoundingClientRect()`. The tap lands at `x + 0.08·w, y + h/2` (the checkbox square).
+`Js.CF_BOX` finds the Turnstile host — `#cf-turnstile`, `iframe[src*="cloudflare.com"]`, or the sized ancestor of the hidden `cf-chl-widget-*` input — `scrollIntoView`s it, and returns its `getBoundingClientRect()`. The tap lands at `x + min(w·0.11, 36px), y + h/2` (the checkbox square).
 
-Tap transport (`MainActivity.tap()`): CSS coords → physical px — `physical = (css − visualViewport.offset) × (devicePixelRatio × visualViewport.scale)` (verified on-device) — then `A11yService.tapAt()` dispatches a **curved `dispatchGesture` stroke** (~120–180ms, shallow arc with micro-overshoot — a single-point teleport reads as synthetic to Turnstile's interaction scoring). Genuine input reaches the cross-origin iframe; falls back to synthetic `dispatchTouchEvent` when the accessibility service is unbound.
+Tap transport (`MainActivity.tap()`): CSS coords → physical px — `physical = (css − visualViewport.offset) × (viewPx / visualViewport.width)` (self-calibrating, verified on-device) — then `A11yService.tapAt()` dispatches a sub-slop `dispatchGesture` stroke (down/up on target with ±2.5px micro-wiggle, hold 80–150ms, ~15% of taps hold 180–340ms). Genuine input reaches the cross-origin iframe; falls back to synthetic `dispatchTouchEvent` when the accessibility service is unbound.
 
-Escalation: 2 failed rounds → "CAPTCHA needs you" notification (deduped 5min, **full-screen intent** brings the app forward); every 5th failed round → VPN rotate + reload.
+Human-signature layer (solver loop): ~75% of attempts are preceded by `A11yService.glideThrough` — a **cubic-bezier finger-glide that sweeps across the widget** (12–20 waypoints, 350–700ms, enters ~150–340px to one side, exits ~70–160px past the other, lifts off the box so it never registers as a click). The genuine `touchmove` stream inside the iframe is what Turnstile scores before a click — a tap materializing from nowhere is a bot tell. Attempt rhythm is 1.4–3.2s with a 3.5–6s "recheck" pause every ~4th (a metronome is also a tell). Every 3rd attempt additionally fires `cfKeySolve` (focus + SPACE via `dispatchKeyEvent` — a second genuine-input channel; the only path when a11y is unbound).
+
+Escalation: 2 failed rounds → "CAPTCHA needs you" notification (deduped 5min, **full-screen intent** brings the app forward); every 4th failed round → VPN rotate + reload. `VpnManager.rotate` now prefers exits outside the burned exit's /16 — Nord egress ranges are shared across countries and CF flags the range.
+
+**Verified on-device (Samsung A26, WebView 153):** the widget accepts `dispatchGesture` taps — `cf_clearance` is issued every round (1–4 attempts). `input tap` (shell-injected events) does NOT activate the widget — synthetic events are detectably synthetic even to Turnstile. If `cf_clearance` issues but the next nav still 403s, the origin is re-challenging at policy level (site in aggressive mode affects real Chrome on residential IPs too) — rotate and keep the loop patient; no client-side fix exists for that phase.
 
 ## VPN — embedded WireGuard (NordLynx)
 
@@ -158,7 +164,7 @@ Guards: `rotating` in-flight flag, `!paused`, `!domFallbackActive` (DOM cycle sh
 
 - AES-256-GCM key generated once in AndroidKeyStore (alias `ivac_profiles_key`, never leaves TEE); ciphertext in SharedPreferences. Blob = Base64(12B IV + CT).
 - `profiles_v2` — encrypted `Profile[]` JSON (one-time migrates legacy plaintext `profiles` key).
-- `set_<key>` — encrypted settings: `wg_privkey`, `nord_token`, `wg_servers`, `vpn_ip`, `tg_token`, `tg_chat`, `running_profile`, `a11y_asked`, `battery_asked`, `direct_api`.
+- `set_<key>` — encrypted settings: `wg_privkey`, `nord_token`, `wg_servers`, `vpn_ip`, `tg_token`, `tg_chat`, `running_profile`, `a11y_asked`, `battery_asked`, `special_window`.
 - `importDesktopConfig(json)` — parses desktop `config.local.json`, **merges by id/username** preserving `dryRun`/`enabled`/`cityRetrySeconds`.
 - `profiles_import.json` bootstrap — `MainActivity.onCreate` imports `filesDir/profiles_import.json` if present, then deletes it (how `adb push`/`run-as` seeding works).
 
@@ -184,13 +190,19 @@ Guards: `rotating` in-flight flag, `!paused`, `!domFallbackActive` (DOM cycle sh
 
 `ProfileActivity`: Username, Password, 3 × (question dropdown + answer field) using the Electron `questionGroups` (stored questions not in a group appear as a custom option so pairings survive), 5 VAC city checkboxes, Start/End Date, Preferred Time, Retry Seconds, Dry-run + Prefer-least-busy-slot checkboxes, Save/Delete.
 
-## Direct schedule-API path
+## Confirmation PDF
 
-Gated by the `direct_api` setting (header API:ON/OFF button, default OFF). When ON and on the OFC page, `directSweep` polls every configured city via same-origin `custom-actions` POSTs (`Js.DIRECT_*`) — no DOM city-select needed — and books via the entries→submit token chain with a fresh Token per attempt. `preferLeastSlots` flips the entry ordering (least- vs most-availability first). Three consecutive sweep errors fall back to the DOM cycle for that pass. Consular always uses the DOM cycle (direct sweep is OFC-only). Booking chain is still awaiting a live-drop verification — DOM fallback keeps failure modes safe.
+Desktop `confirmation.ts` parity: on consular booking the site lands on `/en-US/appointment-confirmation` — `Engine.confirmationPdfFlow()` polls the URL (45s), waits for `PRIMARY APPLICANT DETAILS`, scrapes the caption fields (`Js.CONF_DETAILS`), renders the page to PDF via `PdfPrint` (`WebView.capturePicture()` → `PdfDocument`, A4-paginated — the only silent in-process rasterization; the `PrintDocumentAdapter` callbacks are package-private and `PrintManager` needs the system dialog), saves to `files/confirmations/`, and uploads via `Telegram.sendDocument` (multipart `/sendDocument`, 20s timeouts; text-caption fallback on failure). Bounded ~75s, never throws.
+
+## UI
+
+Minimalist native chrome over the WebView: white toolbar chips (START is the only accent), card-style profile rows (name + live status + EDIT), hairline dividers, dark monospace log pane. `Win` toggle replaces the old `WIN:ON/OFF` label (`Win ●` when armed).
+
+**WebView viewport is locked** — `useWideViewPort` + `loadWithOverviewMode` (full page width always visible, no horizontal pan) with `setSupportZoom(false)`: no pinch/double-tap zoom, `visualViewport.scale` stays 1 so the CF-tap coordinate mapping never drifts.
 
 ## Known deltas vs desktop
 
-- Direct API is the fetch-based sweep above — not the desktop's 3-tier jQuery/XHR/DOM-capture stack (`api-direct.ts` Tier-1/2 don't exist on mobile).
+- No direct/custom-actions API path (removed — the element flow + response capture is the single booking path; "app never fires its own schedule requests" parity rule).
 - Rotation pool is country-granular (≤4 WG servers/country) vs the desktop's 67-city NordVPN CLI sequence — same order, coarser granularity. New-exit IP is geo-verified via ip-api.com (wrong-country egress rejected), matching the desktop's target check.
 - `Checkpoint` is forensic-only (no fast-resume — page state is re-derived live); no Playwright-style diagnostics/traces.
 - One profile runs at a time (selection UI; concurrent sessions are a future goal).
