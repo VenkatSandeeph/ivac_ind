@@ -3,6 +3,7 @@ const { app, BrowserWindow, dialog, shell } = require('electron');
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { spawn, exec } = require('child_process');
 const net = require('net');
 const os = require('os');
@@ -18,13 +19,19 @@ const CONFIG_PATH = path.join(PROJECT_ROOT, 'config.local.json');
 const LICENSE_FILE_PATH = path.join(PROJECT_ROOT, '.license');
 const PORT = 3456;
 
+// Per-launch bearer token for the local API. Without it, any process or
+// webpage on this machine could hit /api/license-logout, /api/profiles (which
+// returns stored profile data) etc. Injected into renderer.js at serve time —
+// never present on disk, never guessable.
+const API_TOKEN = crypto.randomBytes(24).toString('hex');
+
 // NordVPN initial check — only on first profile start
 let nordvpnChecked = false;
 
 // ---- Supabase license config ----
 const LICENSE_SUPABASE_URL = 'https://ptgvkfawdwgwlrpuowjk.supabase.co';
 const LICENSE_SUPABASE_KEY = 'sb_publishable_BpwV8vJS8RkVAlgayjlK1g_JSED4oLE';
-const LICENSE_TABLE = 'Licenses';
+
 
 // ---- state ----
 const runningProfiles = new Map();
@@ -296,21 +303,22 @@ async function validateLicenseKey(licenseKey) {
 
     const client = createClient(LICENSE_SUPABASE_URL, LICENSE_SUPABASE_KEY);
 
+    // SECURITY DEFINER RPC — anon has no table access on Licenses, so keys
+    // can't be listed; returns the row only for the exact key supplied and
+    // performs the system_name / last_validated_at tracking update inside.
+    const systemName = getSystemName();
     const { data, error } = await client
-      .from(LICENSE_TABLE)
-      .select('*')
-      .eq('license_key', key)
-      .limit(1);
+      .rpc('validate_license', { p_key: key, p_system: systemName });
 
     if (error) {
       return { valid: false, status: 'network_error', message: 'License server error: ' + (error.message || 'Unknown') };
     }
 
-    if (!data || data.length === 0) {
+    if (!data) {
       return { valid: false, status: 'invalid_key', message: 'Invalid license key.' };
     }
 
-    const record = data[0];
+    const record = data;
 
     if (record.terminated) {
       return { valid: false, status: 'terminated', message: 'This license has been terminated by the administrator.', record };
@@ -327,14 +335,6 @@ async function validateLicenseKey(licenseKey) {
       }
     }
 
-    const systemName = getSystemName();
-    await client
-      .from(LICENSE_TABLE)
-      .update({ system_name: systemName, last_validated_at: new Date().toISOString() })
-      .eq('license_key', key)
-      .then(() => null)
-      .catch(() => null);
-
     return { valid: true, status: 'valid', message: 'License valid. Welcome, ' + record.client_name + '.', record: { ...record, system_name: systemName } };
   } catch (err) {
     try {
@@ -347,30 +347,29 @@ async function validateLicenseKey(licenseKey) {
 
 async function validateLicenseViaRest(key) {
   const https = require('https');
-  const url = LICENSE_SUPABASE_URL + '/rest/v1/' + LICENSE_TABLE +
-    '?license_key=eq.' + encodeURIComponent(key) + '&select=*&limit=1';
+  const url = LICENSE_SUPABASE_URL + '/rest/v1/rpc/validate_license';
+  const postBody = JSON.stringify({ p_key: key, p_system: getSystemName() });
 
   return new Promise((resolve) => {
-    const req = https.get(url, {
+    const req = https.request(url, {
+      method: 'POST',
       headers: {
         'apikey': LICENSE_SUPABASE_KEY,
         'Authorization': 'Bearer ' + LICENSE_SUPABASE_KEY,
-        'Content-Type': 'application/json'
-      },
-      rejectUnauthorized: false
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(postBody)
+      }
     }, (res) => {
       let body = '';
       res.on('data', (c) => { body += c; });
       res.on('end', () => {
         try {
-          const data = JSON.parse(body);
+          const record = body && body !== 'null' ? JSON.parse(body) : null;
 
-          if (!Array.isArray(data) || data.length === 0) {
+          if (!record) {
             resolve({ valid: false, status: 'invalid_key', message: 'Invalid license key.' });
             return;
           }
-
-          const record = data[0];
 
           if (record.terminated) {
             resolve({ valid: false, status: 'terminated', message: 'This license has been terminated by the administrator.', record });
@@ -390,25 +389,8 @@ async function validateLicenseViaRest(key) {
             }
           }
 
-          const systemName = getSystemName();
-          const patchUrl = LICENSE_SUPABASE_URL + '/rest/v1/' + LICENSE_TABLE +
-            '?license_key=eq.' + encodeURIComponent(key);
-          const patchBody = JSON.stringify({ system_name: systemName, last_validated_at: new Date().toISOString() });
-          const patchReq = https.request(patchUrl, {
-            method: 'PATCH',
-            headers: {
-              'apikey': LICENSE_SUPABASE_KEY,
-              'Authorization': 'Bearer ' + LICENSE_SUPABASE_KEY,
-              'Content-Type': 'application/json',
-              'Content-Length': Buffer.byteLength(patchBody)
-            },
-            rejectUnauthorized: false
-          }, () => {});
-          patchReq.write(patchBody);
-          patchReq.end();
-          patchReq.on('error', () => {});
-
-          resolve({ valid: true, status: 'valid', message: 'License valid. Welcome, ' + record.client_name + '.', record: { ...record, system_name: systemName } });
+          // system_name / last_validated_at are updated inside the RPC.
+          resolve({ valid: true, status: 'valid', message: 'License valid. Welcome, ' + record.client_name + '.', record: { ...record, system_name: getSystemName() } });
         } catch (parseErr) {
           resolve({ valid: false, status: 'network_error', message: 'Invalid response from license server.' });
         }
@@ -423,6 +405,9 @@ async function validateLicenseViaRest(key) {
       req.destroy();
       resolve({ valid: false, status: 'network_error', message: 'License server timeout.' });
     });
+
+    req.write(postBody);
+    req.end();
   });
 }
 
@@ -648,7 +633,13 @@ const MIME = { '.html': 'text/html', '.css': 'text/css', '.js': 'application/jav
 function serveStatic(res, filePath) {
   const ext = path.extname(filePath);
   try {
-    const content = fs.readFileSync(filePath);
+    let content = fs.readFileSync(filePath);
+    // Inject the per-launch API token into renderer.js (see API_TOKEN above).
+    // On-disk file keeps the __IVAC_API_TOKEN__ placeholder — fail-closed if
+    // this path is ever bypassed.
+    if (path.basename(filePath) === 'renderer.js') {
+      content = content.toString('utf8').replace(/__IVAC_API_TOKEN__/g, API_TOKEN);
+    }
     res.writeHead(200, {
       'Content-Type': MIME[ext] || 'text/plain',
       'Cache-Control': 'no-store, no-cache, must-revalidate'
@@ -686,6 +677,11 @@ const apiServer = http.createServer(async (req, res) => {
   if (url === '/' || url === '/index.html') return serveStatic(res, path.join(__dirname, 'index.html'));
   if (url === '/renderer.js') return serveStatic(res, path.join(__dirname, 'renderer.js'));
   if (url === '/styles.css')  return serveStatic(res, path.join(__dirname, 'styles.css'));
+
+  // ---- API auth gate — every /api/* route requires the per-launch token ----
+  if (url.startsWith('/api/') && req.headers['x-ivac-token'] !== API_TOKEN) {
+    return jsonResponse(res, { error: 'forbidden' }, 403);
+  }
 
   // ---- License API ----
 

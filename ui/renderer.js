@@ -1,5 +1,18 @@
 /* renderer.js -- Browser-side UI logic for IVAC Launcher (multi-profile) */
 
+// Per-launch API token — main.js injects the real value when serving this
+// file; the placeholder never matches, so a stale/unmodified file fails closed.
+const IVAC_API_TOKEN = '__IVAC_API_TOKEN__';
+const _ivacFetch = window.fetch.bind(window);
+window.fetch = (input, init) => {
+  const url = typeof input === 'string' ? input : (input && input.url) || '';
+  if (url.startsWith('/api/')) {
+    init = init || {};
+    init.headers = Object.assign({}, init.headers, { 'x-ivac-token': IVAC_API_TOKEN });
+  }
+  return _ivacFetch(input, init);
+};
+
 let appState = {
   licensed: false,
   clientName: '',

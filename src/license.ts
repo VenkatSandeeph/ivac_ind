@@ -9,10 +9,10 @@ import path from 'path';
 import os from 'os';
 import { createClient } from '@supabase/supabase-js';
 
-// Supabase project for licensing (anon key — read + update only via RLS)
+// Supabase project for licensing (publishable key — no direct table access;
+// validation goes through the validate_license SECURITY DEFINER RPC)
 const LICENSE_SUPABASE_URL = 'https://ptgvkfawdwgwlrpuowjk.supabase.co';
 const LICENSE_SUPABASE_KEY = 'sb_publishable_BpwV8vJS8RkVAlgayjlK1g_JSED4oLE';
-const LICENSE_TABLE = 'Licenses';
 
 export type LicenseRecord = {
   id: string;
@@ -95,15 +95,19 @@ export async function validateLicense(licenseKey: string): Promise<LicenseResult
 
   const key = licenseKey.trim();
 
+  const systemName = getSystemName();
+
   try {
     const client = createClient(LICENSE_SUPABASE_URL, LICENSE_SUPABASE_KEY);
 
-    // Query the license
+    // validate_license is a SECURITY DEFINER RPC: the anon role has NO table
+    // privileges on Licenses at all, so keys can never be listed — validation
+    // returns the row only for the exact key supplied, and the system_name /
+    // last_validated_at tracking update happens inside the function.
     const { data, error } = await client
-      .from(LICENSE_TABLE)
-      .select('*')
-      .eq('license_key', key)
-      .limit(1);
+      .rpc('validate_license', { p_key: key, p_system: systemName });
+
+    const record = (data ?? null) as LicenseRecord | null;
 
     if (error) {
       return {
@@ -113,11 +117,9 @@ export async function validateLicense(licenseKey: string): Promise<LicenseResult
       };
     }
 
-    if (!data || data.length === 0) {
+    if (!record) {
       return { valid: false, status: 'invalid_key', message: 'Invalid license key.' };
     }
-
-    const record = data[0] as LicenseRecord;
 
     // Check terminated
     if (record.terminated) {
@@ -152,19 +154,7 @@ export async function validateLicense(licenseKey: string): Promise<LicenseResult
       }
     }
 
-    // Valid — update tracking fields
-    const systemName = getSystemName();
-    try {
-      await client
-        .from(LICENSE_TABLE)
-        .update({
-          system_name: systemName,
-          last_validated_at: new Date().toISOString()
-        })
-        .eq('license_key', key);
-    } catch {
-      // non-fatal if update fails
-    }
+    // Tracking fields were already updated inside the RPC (anon has no UPDATE).
 
     return {
       valid: true,

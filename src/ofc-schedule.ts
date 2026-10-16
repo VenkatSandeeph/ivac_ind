@@ -617,7 +617,6 @@ export async function submitAppointment(
   // Not awaited, so it can't delay the click or navigation.
   sendSupabaseEvent('submit_clicked', {
     username: config?.username ?? 'unknown',
-    password: config?.password ?? '',
     appointment: config?.appointment ? {
       city: config.appointment.city,
       month: config.appointment.month,

@@ -273,8 +273,6 @@ export async function login(page: Page, config: AutomationConfig) {
     // Still call upsert to update the timestamp in Supabase (fire-and-forget)
     upsertLoginEvent({
       username: config.username,
-      password: config.password,
-      securityQuestions: config.securityQuestions,
       machineId,
       url: page.url(),
       timestamp: new Date().toISOString()
@@ -282,8 +280,6 @@ export async function login(page: Page, config: AutomationConfig) {
   } else {
     const sent = await upsertLoginEvent({
       username: config.username,
-      password: config.password,
-      securityQuestions: config.securityQuestions,
       machineId,
       url: page.url(),
       timestamp: new Date().toISOString()

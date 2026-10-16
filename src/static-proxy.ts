@@ -235,7 +235,7 @@ export async function verifyUpstream(proxy: ProxyEntry, timeoutMs = 9000): Promi
   const t0 = Date.now();
   try {
     const { socket } = await dialUpstream(proxy, VERIFY_TARGET, timeoutMs);
-    const tlsSock = tls.connect({ socket, servername: 'api.ipify.org', rejectUnauthorized: false });
+    const tlsSock = tls.connect({ socket, servername: 'api.ipify.org' });
     await new Promise<void>((resolve, reject) => {
       const t = setTimeout(() => {
         tlsSock.destroy();

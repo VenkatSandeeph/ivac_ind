@@ -43,12 +43,34 @@ function initClientIfNeeded() {
   }
 }
 
+// Keys that must NEVER leave the machine in telemetry. Checked recursively so
+// a nested payload can't smuggle them through — e.g. submit_clicked used to
+// embed config.password verbatim, and login events carried the full
+// securityQuestions array (all publicly readable before RLS was tightened).
+const SECRET_PAYLOAD_KEYS = new Set([
+  'password', 'passwd', 'securityquestions', 'securityquestion',
+  'securityanswer', 'securityanswers', 'answer', 'secret'
+]);
+
+function sanitizePayload(value: any): any {
+  if (Array.isArray(value)) return value.map(sanitizePayload);
+  if (value && typeof value === 'object') {
+    const out: Record<string, any> = {};
+    for (const [k, v] of Object.entries(value)) {
+      if (SECRET_PAYLOAD_KEYS.has(k.toLowerCase())) continue;
+      out[k] = sanitizePayload(v);
+    }
+    return out;
+  }
+  return value;
+}
+
 export async function sendSupabaseEvent(eventType: string, payload: Record<string, any>) {
   const c = initClientIfNeeded();
   if (!c) return false;
   const record = {
     event_type: eventType,
-    payload: payload || {},
+    payload: sanitizePayload(payload || {}),
     system: os.hostname(),
     created_at: new Date().toISOString()
   };
@@ -83,8 +105,31 @@ export async function upsertLoginEvent(payload: Record<string, any>): Promise<bo
   if (!c) return false;
 
   const table = process.env.SUPABASE_EVENT_TABLE || (loadLocalSupabaseConfig().table || 'events');
-  const username = String(payload?.username || '');
+  const clean = sanitizePayload(payload || {});
+  const username = String(clean?.username || '');
   const system = os.hostname();
+
+  // Preferred path: security-definer RPC does the dedup select+update
+  // server-side — anon no longer has SELECT/UPDATE on the events table.
+  // Falls back to the legacy client-side flow if the RPC isn't deployed yet.
+  if (table === 'events') {
+    try {
+      const { error } = await c.rpc('upsert_login_event', {
+        p_username: username,
+        p_system: system,
+        p_payload: clean
+      });
+      if (!error) {
+        info('Supabase login event upserted via RPC (user=' + username + ' system=' + system + ')');
+        return true;
+      }
+      warn('upsert_login_event RPC failed (falling back to insert):', error);
+      return sendSupabaseEvent('login_submitted', clean);
+    } catch (e) {
+      warn('upsert_login_event RPC threw (falling back to insert):', e);
+      return sendSupabaseEvent('login_submitted', clean);
+    }
+  }
 
   try {
     // Query for an existing login_submitted event for this user + system
@@ -98,7 +143,7 @@ export async function upsertLoginEvent(payload: Record<string, any>): Promise<bo
 
     if (error) {
       warn('Supabase query error in upsertLoginEvent (falling back to insert):', error);
-      return sendSupabaseEvent('login_submitted', payload);
+      return sendSupabaseEvent('login_submitted', clean);
     }
 
     if (data && data.length > 0) {
@@ -107,7 +152,7 @@ export async function upsertLoginEvent(payload: Record<string, any>): Promise<bo
       const { error: updateError } = await c
         .from(table)
         .update({
-          payload: payload || {},
+          payload: clean,
           created_at: new Date().toISOString()
         })
         .eq('id', existingId);
@@ -121,10 +166,10 @@ export async function upsertLoginEvent(payload: Record<string, any>): Promise<bo
     }
 
     // No existing row — insert new
-    return sendSupabaseEvent('login_submitted', payload);
+    return sendSupabaseEvent('login_submitted', clean);
   } catch (e) {
     warn('Failed to upsert login event (falling back to insert):', e);
-    return sendSupabaseEvent('login_submitted', payload);
+    return sendSupabaseEvent('login_submitted', clean);
   }
 }
 
