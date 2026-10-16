@@ -11,6 +11,7 @@ export type OfcBookedNotification = {
   city: string;
   date: string;
   time: string;
+  poc?: string;
 };
 
 /**
@@ -141,11 +142,13 @@ export async function sendOfcBookedNotification(data: OfcBookedNotification): Pr
   const message = [
     '<b>✅ OFC Appointment Booked</b>',
     '',
-    `<b>👤 User:</b> ${escapeHtml(data.username)}`,
+    `<b>👤 Client User:</b> ${escapeHtml(data.username)}`,
     `<b>🏙 City:</b> ${escapeHtml(data.city)}`,
     `<b>📅 Date:</b> ${escapeHtml(data.date)}`,
     `<b>⏰ Time:</b> ${escapeHtml(data.time)}`,
-    `<b>🕐 Booked At:</b> ${timestamp}`
+    `<b>🕐 Booked At:</b> ${timestamp}`,
+    '',
+    `<b>SPOC:</b> ${escapeHtml(data.poc || 'unknown')}`
   ].join('\n');
 
   return sendTelegramMessage(message);
