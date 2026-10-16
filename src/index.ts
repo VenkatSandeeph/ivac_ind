@@ -1677,6 +1677,7 @@ async function main() {
 
   let attempt = previousCheckpoint?.attempt ?? 0;
   let booked = false;
+  let lastLicenseCheckAt = 0;    // last license heartbeat — see loop head
   let checkpointFastResumePending = checkpointCanResumeInPlace;
   // Attempt-scoped with a 3-strike ceiling: a single congested-window 403
   // (observed during slot drops) must not kill the fast path for the whole
@@ -1711,6 +1712,16 @@ async function main() {
     if (checkStopSignal()) {
       info('[STOPPED] Stop signal received. Script stopping (Chrome will stay open).');
       await gracefulExit(config);
+    }
+
+    // License heartbeat — revalidate every ~60 min to refresh last_validated_at
+    // and the per-license machine list server-side. Fire-and-forget: never
+    // awaited, never stops the run — a network blip must not kill a session.
+    if (Date.now() - lastLicenseCheckAt > 60 * 60_000) {
+      lastLicenseCheckAt = Date.now();
+      validateLicense(licenseKey)
+        .then((r) => info(`[LICENSE] heartbeat: ${r.status}`))
+        .catch(() => null);
     }
 
     // Static IP: UI Rotate IP button → advance this profile's proxy round-robin.
