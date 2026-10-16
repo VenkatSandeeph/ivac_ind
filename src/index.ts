@@ -1597,6 +1597,7 @@ async function main() {
   info('License valid for:', licensePoc);
 
   const config = loadConfig();
+  config.licensePoc = licensePoc;
   if (config.preferLeastSlots) {
     info('Slot selection mode: LEAST available slots first (preferLeastSlots enabled)');
   }

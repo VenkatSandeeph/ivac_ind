@@ -118,7 +118,20 @@ export async function sendConfirmationPdfToTelegram(page: Page, config: Automati
   try {
     const landed = await waitForConfirmationPage(page, 45000);
     if (!landed) {
-      warn(`Confirmation: page did not reach ${CONFIRMATION_URL_FRAGMENT} (url=${page.url()}); skipping PDF capture.`);
+      warn(`Confirmation: page did not reach ${CONFIRMATION_URL_FRAGMENT} (url=${page.url()}); sending text-only alert instead of PDF.`);
+      // The submit already succeeded — Telegram must not stay silent just
+      // because the redirect never landed. Send a text-only alert so the
+      // channel still records the booking.
+      await sendTelegramMessage([
+        '<b>✅ Consular Appointment Submitted</b>',
+        '',
+        `<b>👤 Client User:</b> ${escapeHtml(config.username)}`,
+        `<b>🕐 Booked At:</b> ${istTimestamp()}`,
+        '',
+        `<b>SPOC:</b> ${escapeHtml(config.licensePoc || 'unknown')}`,
+        '',
+        '(Confirmation page did not load within 45s — check the browser manually for the confirmation PDF.)'
+      ].join('\n')).catch(() => null);
       return;
     }
     info(`Confirmation: on appointment-confirmation page (${page.url()}); capturing PDF...`);
@@ -141,7 +154,7 @@ export async function sendConfirmationPdfToTelegram(page: Page, config: Automati
     const captionLines = [
       '<b>✅ Consular Appointment Booked — Confirmation</b>',
       '',
-      `<b>👤 User:</b> ${escapeHtml(config.username)}`
+      `<b>👤 Client User:</b> ${escapeHtml(config.username)}`
     ];
     if (details.applicantName) captionLines.push(`<b>🪪 Applicant:</b> ${escapeHtml(details.applicantName)}`);
     if (details.consularLocation || details.consularDate) {
@@ -151,6 +164,8 @@ export async function sendConfirmationPdfToTelegram(page: Page, config: Automati
       captionLines.push(`<b>🏙 OFC:</b> ${escapeHtml([details.ofcLocation, details.ofcDate].filter(Boolean).join(' — '))}`);
     }
     captionLines.push(`<b>🕐 Booked At:</b> ${timestamp}`);
+    captionLines.push('');
+    captionLines.push(`<b>SPOC:</b> ${escapeHtml(config.licensePoc || 'unknown')}`);
     const caption = captionLines.join('\n');
 
     if (pdf) {

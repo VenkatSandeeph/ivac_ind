@@ -73,6 +73,7 @@ export type AutomationConfig = {
   specialWindowOnly: boolean;
   nordvpn: NordVpnConfig;
   staticProxy: StaticProxyConfig;
+  licensePoc?: string;  // runtime-only: license client_name, set in main() after validation
 };
 
 export type ProfileConfig = {
