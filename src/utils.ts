@@ -10,12 +10,20 @@ export async function pageHasSelector(page: Page, selector: string): Promise<boo
 }
 
 export async function isLoginPage(page: Page): Promise<boolean> {
-  return (
-    (await pageHasSelector(page, '#signInName')) ||
-    (await pageHasSelector(page, 'input[title*="username" i]')) ||
-    (await pageHasSelector(page, 'input[placeholder*="username" i]')) ||
-    (await pageHasSelector(page, 'input[id*="user" i]'))
-  );
+  // Visibility required — a hidden <input id="...user..."> (ASP.NET hidden
+  // fields are everywhere on this site) must not classify a page as 'login'.
+  const selectors = [
+    '#signInName',
+    'input[title*="username" i]',
+    'input[placeholder*="username" i]',
+    'input[id*="user" i]'
+  ];
+  for (const selector of selectors) {
+    if (await page.locator(selector).first().isVisible().catch(() => false)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export async function waitForPortOpen(port: number, timeoutMs: number): Promise<boolean> {

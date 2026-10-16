@@ -237,16 +237,19 @@ powershell -NoProfile -Command "Compress-Archive -Path 'release<N>/win-unpacked\
 | Function | Returns `true` when... |
 |---|---|
 | `isSchedulePage(page)` | URL contains `/en-US/ofc-schedule` AND `#post_select` is present |
-| `isLoginPage(page)` | `#signInName` or username/email input fields are present |
+| `isLoginPage(page)` | A username field (`#signInName` / username-labeled inputs) is **visible** |
 | `isSecurityQuestionPage(page)` | `p.textInParagraph[id^="kbq"]` AND `input[type="password"]` present |
 | `isHomePage(page)` | URL contains `/en-US/` (not ofc-schedule) AND `#continue_application` present |
-| `isVerificationPage(page)` | Delegates to `isHumanVerificationPresent()` |
+| `isHumanVerificationPresent(page)` | CF-only markers: `Just a moment`/`waiting room` title, cloudflare challenge iframes, CF-specific text — script/style-stripped body scan (no generic checkbox/`captcha` matches) |
 | `isInternalPage(page)` | URL is blank, `chrome://`, `edge://`, `devtools://`, or empty |
 | `isRelevantSite(page)` | URL matches `usvisascheduling.com` or `b2clogin.com` |
+| `detectPageState(page)` | Single classifier — returns one state: `internal`/`irrelevant`/`hard_block`/`login_failed`/`privacy`/`security`/`login`/`home`/`cloudflare`/`ofc`/`consular`/`suppressed`/`unknown` (+ hard-block reason) |
 
 ### Core Orchestration (`index.ts`)
 
-- **`resumeFromCurrentPage(page, config, options?)`** -- Central state machine. Inspects current URL and DOM to determine state, then takes recovery action. Up to 30 detection attempts. Supports `allowNavigation: false` for checkpoint resume to avoid unnecessary navigation.
+- **`detectPageState(page)`** -- Single shared page classifier used by every recovery seam. App-page states are prioritized over `cloudflare` (a real CF interstitial replaces the document; a login page embedding a captcha widget is `login`); `cloudflare` precedes `ofc`/`consular` so a Turnstile overlaid on a schedule page still waits.
+
+- **`resumeFromCurrentPage(page, config, options?)`** -- Central state machine; a `switch` on `detectPageState`, up to 30 detection attempts. Options: `allowNavigation: false` (checkpoint resume — pure polling, no navigation); `skipHardBlockRecovery` (caller is already inside `recoverFromBlockPage` — returns on `hard_block` instead of recursing). `unknown` state escalates bounded: poll ~20s → one reload → poll → navigate home → throw. Returns on `ofc`/`consular`/`suppressed` (suppression is the caller's stage-specific handler's job). Called after every recovery reload/navigation so post-challenge landings on login/privacy/security pages are routed, not assumed.
 
 - **`computeRetryDelay(baseSeconds, totalCities)`** -- Unified retry delay computation with special window awareness. Returns `{ delayMs, isSpecialWindow, specialMinute }`. Behavior:
   - **Inside a special window** (`:00, :01, :21, :26, :56, :57, :58`): Uses a fixed 2s delay for fast cycling through all desired cities. After one full round through all cities, returns to normal delay. Tracks round completion via `specialWindowCitiesChecked` counter.

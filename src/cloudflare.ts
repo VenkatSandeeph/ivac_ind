@@ -1,6 +1,5 @@
 import type { Page } from 'patchright';
 import { info, warn, uiStatus } from './logger';
-import { isLoginPage } from './utils';
 
 // ---------------------------------------------------------------------------
 //  Bezier curve human-like mouse movement
@@ -55,21 +54,23 @@ async function humanMove(page: Page, tx: number, ty: number) {
 //  Challenge detection
 // ---------------------------------------------------------------------------
 
+// CF-only markers. Deliberately absent from this list:
+//  - 'label:has(input[type="checkbox"])' — matched ANY label-wrapped checkbox,
+//    so the post-login Privacy Act page (two consent checkboxes) was classified
+//    as an endless Cloudflare challenge and the CF wait spun to timeout.
+//  - hcaptcha/recaptcha iframes and a bare 'captcha' text match — the B2C login
+//    page can embed a captcha widget; that page is 'login', not 'cloudflare'.
 const challengeSelectors = [
   'iframe[src*="cloudflare.com"]',
-  'iframe[src*="hcaptcha.com"]',
-  'iframe[src*="recaptcha"]',
+  'iframe[src*="challenges.cloudflare.com"]',
   'iframe[src*="browser-verification"]',
   'label:has-text("Verify you are human")',
   'input[type="checkbox"][aria-label*="verify you are human"]',
-  'label:has(input[type="checkbox"])',
   'text=/performing security verification/i',
   'text=/this website uses a security service/i',
   'text=/verify you are human/i',
   'text=/checking your browser/i',
-  'text=/attention required/i',
-  'text=/captcha/i',
-  'text=/waiting room/i'
+  'text=/checking if the site connection is secure/i'
 ];
 
 export async function isHumanVerificationPresent(page: Page) {
@@ -85,11 +86,17 @@ export async function isHumanVerificationPresent(page: Page) {
     }
   }
 
-  // Use textContent (via page.evaluate) instead of innerText for reliability.
-  // innerText only returns visible text and can return '' on partially-rendered
-  // Cloudflare pages, causing detection to fail.
-  const body = await page.evaluate(() => document.body?.textContent ?? '').catch(() => '');
-  return /verify you are human|performing security verification|checking your browser|attention required|captcha|waiting room/i.test(body);
+  // Body scan for CF challenge phrases. The clone strips script/style/noscript
+  // first — document.body.textContent includes inline <script> contents, so a
+  // page whose own JS merely references captcha/challenge code was previously
+  // misdetected as a Cloudflare page forever.
+  const body = await page.evaluate(() => {
+    const clone = document.body?.cloneNode(true) as HTMLElement | null;
+    if (!clone) return '';
+    clone.querySelectorAll('script,style,noscript,template').forEach((n) => n.remove());
+    return clone.textContent ?? '';
+  }).catch(() => '');
+  return /verify you are human|performing security verification|checking your browser|checking if the site connection is secure|this website uses a security service|waiting room/i.test(body);
 }
 
 // ---------------------------------------------------------------------------
@@ -368,16 +375,4 @@ export async function isHardBlocked(
   return { blocked: false, reason: null };
 }
 
-export async function waitForLoginOrVerification(page: Page, timeoutMs: number) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await isLoginPage(page)) {
-      return 'login';
-    }
-    if (await isHumanVerificationPresent(page)) {
-      return 'verification';
-    }
-    await page.waitForTimeout(1000);
-  }
-  return null;
-}
+

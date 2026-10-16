@@ -226,7 +226,10 @@ async function recoverFromBlockPage(page: Page, config: any, reason: string | nu
     client('⏳', 'Rate-limited — cooling down 60s (keeping IP)...');
     await sleepWithStopSignal(60000);
     await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null);
-    await waitForHumanVerificationIfNeeded(page, config.cloudflareWaitMs, config.autoSolveCloudflare, isAborted).catch(() => null);
+    // Route whatever the reload resolved into (login/privacy/security/home) —
+    // skipHardBlockRecovery so a still-blocked page is handed back here
+    // instead of recursively re-entering this function.
+    await resumeFromCurrentPage(page, config, { skipHardBlockRecovery: true }).catch(() => null);
     await page.waitForTimeout(3000);
     return;
   }
@@ -240,7 +243,7 @@ async function recoverFromBlockPage(page: Page, config: any, reason: string | nu
       return;
     }
     await page.goto(getHomePageUrl(config.scheduleUrl), { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null);
-    await waitForHumanVerificationIfNeeded(page, config.cloudflareWaitMs, config.autoSolveCloudflare, isAborted).catch(() => null);
+    await resumeFromCurrentPage(page, config, { skipHardBlockRecovery: true }).catch(() => null);
     await page.waitForTimeout(3000);
 
     const stillBlocked = await isHardBlocked(page).catch(() => ({ blocked: false, reason: null }));
@@ -268,7 +271,7 @@ async function recoverFromBlockPage(page: Page, config: any, reason: string | nu
       await rotateEgress(config, isAborted, false, `Hard block ${where}: Cloudflare IP block (persisted after home retry)`).catch(() => null);
     }
     await page.goto(getHomePageUrl(config.scheduleUrl), { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null);
-    await waitForHumanVerificationIfNeeded(page, config.cloudflareWaitMs, config.autoSolveCloudflare, isAborted).catch(() => null);
+    await resumeFromCurrentPage(page, config, { skipHardBlockRecovery: true }).catch(() => null);
     await page.waitForTimeout(3000);
     return;
   }
@@ -294,7 +297,7 @@ async function recoverFromBlockPage(page: Page, config: any, reason: string | nu
     info('[HARD BLOCK] Reload failed, navigating to schedule URL directly.');
     await page.goto(config.scheduleUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null);
   });
-  await waitForHumanVerificationIfNeeded(page, config.cloudflareWaitMs, config.autoSolveCloudflare, isAborted).catch(() => null);
+  await resumeFromCurrentPage(page, config, { skipHardBlockRecovery: true }).catch(() => null);
   await page.waitForTimeout(3000);
 }
 
@@ -339,6 +342,7 @@ async function runConsularStageWithRecovery(
   const max403Retries = 3;       // max 403 recovery cycles before waiting longer
   let consecutive403 = 0;
   let consular403StartTs = 0;
+  let consularOfcDetours = 0;    // consecutive landings on the OFC page while in consular stage
 
   for (;;) {
     if (checkStopSignal()) {
@@ -352,7 +356,10 @@ async function runConsularStageWithRecovery(
 
     // Ensure we're on the consular schedule page
     const onConsular = await isConsularSchedulePage(page).catch(() => false);
-    if (onConsular) resetScheduleSuppressionFlags();
+    if (onConsular) {
+      resetScheduleSuppressionFlags();
+      consularOfcDetours = 0;
+    }
     if (!onConsular) {
       // Server withheld the scheduling form (account-level lock — skeleton
       // page with only #error_row, no #page_form). Handle before the generic
@@ -377,6 +384,28 @@ async function runConsularStageWithRecovery(
       }
       const nowConsular = await isConsularSchedulePage(page).catch(() => false);
       if (!nowConsular) {
+        const nowOfc = await isOfcSchedulePage(page).catch(() => false);
+        if (nowOfc) {
+          // Stage mismatch: the session landed on the OFC page while the
+          // consular stage is running (e.g. a Cloudflare/session bounce
+          // re-routed the schedule link). resumeFromCurrentPage treats OFC as
+          // a terminal state, so without this detour the loop spins forever —
+          // wait -> resume -> OFC -> return -> wait. Re-enter via the home
+          // page so the site itself routes to the correct stage; backoff
+          // grows per consecutive detour so a genuinely OFC-bound session
+          // (e.g. OFC released for rebooking) doesn't ping-pong.
+          consularOfcDetours += 1;
+          const detourWaitMs = Math.min(120000, 15000 * consularOfcDetours);
+          warn(`Consular monitoring: recovery landed on the OFC page (detour #${consularOfcDetours}) — re-entering via home so the site routes to consular; next check in ${(detourWaitMs / 1000).toFixed(0)}s.`);
+          uiStatus('Recovering — re-entering consular via home');
+          await reenterScheduleViaHome(page, config);
+          if (await sleepWithStopSignal(detourWaitMs)) {
+            info('Stop signal detected during consular OFC-detour wait; exiting.');
+            return false;
+          }
+          continue;
+        }
+        consularOfcDetours = 0;
         info('Consular monitoring: still not on consular page after recovery; waiting 10s...');
         await page.waitForTimeout(10000);
         continue;
@@ -436,7 +465,7 @@ async function runConsularStageWithRecovery(
             // Reload the page to clear stale Cloudflare session after IP rotation.
             client('🔄', 'Refreshing page after IP rotation...');
             await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null);
-            await waitForHumanVerificationIfNeeded(page, config.cloudflareWaitMs, config.autoSolveCloudflare, isAborted).catch(() => null);
+            await resumeFromCurrentPage(page, config).catch(() => null);
           } else {
             // Auto IP off — never rotate. Cool down on the same IP; the soft
             // 403 decays on its own while the run stays alive.
@@ -1183,11 +1212,14 @@ const SCHEDULE_SUPPRESSION_COOLDOWN_MS = 15 * 60 * 1000;
 async function reenterScheduleViaHome(page: any, config: AutomationConfig): Promise<void> {
   try {
     await page.goto(getHomePageUrl(config.scheduleUrl), { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null);
-    await waitForHumanVerificationIfNeeded(page, config.cloudflareWaitMs, config.autoSolveCloudflare, isAborted).catch(() => null);
-    await navigateToOfcSchedule(page, config.scheduleUrl);
+    // resumeFromCurrentPage covers the CF wait, any login/privacy/security
+    // hops, and the schedule-link click — and returns cleanly wherever the
+    // site routes (ofc / consular / suppressed), instead of a bare CF wait
+    // + OFC-only navigation that throws on a consular landing.
+    await resumeFromCurrentPage(page, config);
   } catch (e) {
-    // navigateToOfcSchedule waits for #post_select — on a still-suppressed
-    // landing that wait times out; harmless, the next loop re-classifies.
+    // resume throws only when recovery exhausts its attempts — harmless here;
+    // the next loop iteration re-classifies and retries.
     info(`[SUPPRESSED] Re-entry ended at ${page.url()} — ${e instanceof Error ? e.message : e}`);
   }
 }
@@ -1271,154 +1303,272 @@ async function isRelevantSite(page: any) {
   return /https?:\/\/(.*\.)?(usvisascheduling\.com|b2clogin\.com)/i.test(url);
 }
 
-async function isVerificationPage(page: any) {
-  return await isHumanVerificationPresent(page);
+// =============================================================================
+// Page-state classifier
+// -----------------------------------------------------------------------------
+// Single detection entry point shared by every recovery seam. The page state
+// is classified into a named enum instead of six ad-hoc per-callsite checks —
+// the classifier is the ONLY place page identity is decided during recovery.
+//
+// Priority order matters: real Cloudflare interstitials replace the entire
+// document, so app-page checks can safely run first — a login page that embeds
+// a captcha widget is 'login', not 'cloudflare'. Cloudflare is checked before
+// the schedule states so a Turnstile overlaid on a schedule page still waits.
+// =============================================================================
+
+type ResumePageState =
+  | 'internal' | 'irrelevant' | 'hard_block' | 'login_failed' | 'login'
+  | 'privacy' | 'security' | 'home' | 'cloudflare'
+  | 'ofc' | 'consular' | 'suppressed' | 'unknown';
+
+type HardBlockReason = 'access_limitation' | 'cloudflare_blocked' | 'rate_limited' | null;
+
+type DetectedPageState = {
+  state: ResumePageState;
+  blockReason: HardBlockReason;
+};
+
+async function detectPageState(page: any): Promise<DetectedPageState> {
+  const none = { blockReason: null as HardBlockReason };
+
+  if (await isInternalPage(page).catch(() => false)) {
+    return { state: 'internal', ...none };
+  }
+  if (!(await isRelevantSite(page).catch(() => false))) {
+    return { state: 'irrelevant', ...none };
+  }
+
+  // Hard block pages need IP rotation — classify before anything DOM-based.
+  const hardBlock = await isHardBlocked(page).catch(() => ({ blocked: false, reason: null as HardBlockReason }));
+  if (hardBlock.blocked) {
+    return { state: 'hard_block', blockReason: hardBlock.reason };
+  }
+
+  // App-page checks run in parallel (independent read-only DOM queries) but are
+  // prioritized in the if-chain below.
+  const [loginFailed, privacy, security, loginPage, home, verification, ofc, consular] =
+    await Promise.all([
+      isLoginFailedPage(page).catch(() => false),
+      isPrivacyActPage(page).catch(() => false),
+      isSecurityQuestionPage(page).catch(() => false),
+      isLoginPage(page).catch(() => false),
+      isHomePage(page).catch(() => false),
+      isHumanVerificationPresent(page).catch(() => false),
+      isOfcSchedulePage(page).catch(() => false),
+      isConsularSchedulePage(page).catch(() => false)
+    ]);
+
+  if (loginFailed) return { state: 'login_failed', ...none };
+  if (privacy) return { state: 'privacy', ...none };
+  if (security) return { state: 'security', ...none };
+  if (loginPage) return { state: 'login', ...none };
+  if (home) return { state: 'home', ...none };
+  if (verification) return { state: 'cloudflare', ...none };
+  if (ofc) return { state: 'ofc', ...none };
+  if (consular) return { state: 'consular', ...none };
+
+  // Schedule URL but the form was withheld server-side (account-level lock).
+  if (await getSuppressedScheduleState(page).catch(() => null)) {
+    return { state: 'suppressed', ...none };
+  }
+
+  return { state: 'unknown', ...none };
 }
 
-async function resumeFromCurrentPage(page: any, config: any, options?: { allowNavigation?: boolean }) {
+/**
+ * Central recovery state machine. Classifies the current page via
+ * detectPageState() each iteration and runs the matching action. Returns once
+ * the page reaches a usable state (ofc / consular / suppressed — suppressed is
+ * returned to the caller, whose stage-specific handler owns it).
+ *
+ * options.allowNavigation=false (checkpoint fast-resume): never navigates —
+ * pure polling, unchanged from the old behavior.
+ * options.skipHardBlockRecovery: return on hard_block instead of calling
+ * recoverFromBlockPage — used when the CALLER is already inside block
+ * recovery, so resume can't re-enter it recursively.
+ *
+ * 'unknown' escalation is bounded: poll (~20s) → one reload → poll (~16s) →
+ * navigate home → poll → throw to the caller's outer retry. A broken page can
+ * never spin on the same dead DOM forever.
+ */
+async function resumeFromCurrentPage(
+  page: any,
+  config: any,
+  options?: { allowNavigation?: boolean; skipHardBlockRecovery?: boolean }
+) {
   const allowNavigation = options?.allowNavigation !== false;
+  const skipHardBlockRecovery = options?.skipHardBlockRecovery === true;
   const maxAttempts = 30;
   uiStatus('Recovering page state');
+  let unknownStage: 'poll' | 'reloaded' | 'homed' = 'poll';
+
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const detected = await detectPageState(page);
     const currentUrl = page.url();
     const currentTitle = await page.title().catch(() => '');
-    // Run all state checks in parallel — each is an independent read-only DOM
-    // query; sequential awaits cost ~150-300ms per loop iteration.
-    const [internal, schedule, consular, onLoginPage, privacyAct, security, home, verification, relevant] =
-      await Promise.all([
-        isInternalPage(page),
-        isOfcSchedulePage(page),
-        isConsularSchedulePage(page),
-        isLoginPage(page),
-        isPrivacyActPage(page),
-        isSecurityQuestionPage(page),
-        isHomePage(page),
-        isVerificationPage(page),
-        isRelevantSite(page)
-      ]);
-    const state = { internal, schedule, consular, login: onLoginPage, privacyAct, security, home, verification, relevant };
-
-    info(`Resume check [${attempt}/${maxAttempts}]: URL =`, currentUrl, 'title =', currentTitle, 'state =', state);
-    // Heartbeat: this loop is ~60s of polling with no client-facing output —
-    // keep the UI status refreshed so it doesn't look frozen.
+    info(`Resume check [${attempt}/${maxAttempts}]: state=${detected.state} url=${currentUrl} title=${currentTitle}`);
     if (attempt % 8 === 0) uiStatus(`Recovering page state (${attempt}/${maxAttempts})`);
 
-    // Check for hard block pages (Cloudflare IP block / Access limitation).
-    // These can appear after an API call gets blocked and the page redirects.
-    // Rotate IP and refresh to recover — cannot be auto-solved.
-    const hardBlock = await isHardBlocked(page).catch(() => ({ blocked: false, reason: null }));
-    if (hardBlock.blocked) {
-      await recoverFromBlockPage(page, config, hardBlock.reason, 'during resumeFromCurrentPage');
-      continue;
-    }
-
-    if (state.internal) {
-      if (!allowNavigation) {
-        info('Internal browser page detected; navigation disabled for checkpoint resume. Waiting for page change.');
-        await page.waitForTimeout(1500);
-        continue;
-      }
-      info('Internal browser page detected. Navigating to authUrl.');
-      await page.goto(config.authUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-      continue;
-    }
-
-    if (state.schedule) {
-      info('Resuming from existing OFC schedule page.');
-      return;
-    }
-
-    if (state.consular) {
-      info('Resuming from existing Consular schedule page (/en-US/schedule/).');
-      return;
-    }
-
-    if (state.verification) {
-      info('Cloudflare or bot verification page detected. Waiting for completion.');
-      client('🌐', 'Cloudflare challenge detected — auto-solving...');
-      await waitForHumanVerificationIfNeeded(page, config.cloudflareWaitMs, config.autoSolveCloudflare, isAborted);
-      continue;
-    }
-
-    if (await isLoginFailedPage(page)) {
-      if (!allowNavigation) {
-        warn('Login failed page detected; navigation disabled for checkpoint resume. Waiting for manual/page recovery.');
-        await page.waitForTimeout(1500);
-        continue;
-      }
-      warn('Detected login failure page. Restarting from authUrl.');
-      await page.goto(config.authUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => null);
-      continue;
-    }
-
-    if (state.login) {
-      info('Resuming from login page.');
-      await login(page, config);
-      continue;
-    }
-
-    if (state.privacyAct) {
-      info('Resuming from Privacy Act Statement page.');
-      await handlePrivacyActStatement(page);
-      continue;
-    }
-
-    if (state.security) {
-      info('Resuming from security questions page.');
-      await answerSecurityQuestions(page, config.securityQuestions);
-      continue;
-    }
-
-    if (state.home) {
-      info('Resuming from home page. Clicking Schedule Appointment.');
-      try {
-        await navigateToOfcSchedule(page, config.scheduleUrl);
-      } catch (e) {
-        const errMsg = e instanceof Error ? e.message : String(e);
-        warn('Error during navigateToOfcSchedule in resumeFromCurrentPage:', errMsg);
-        // Check if the error was caused by a hard block page
-        const hardBlockOnNav = await isHardBlocked(page).catch(() => ({ blocked: false, reason: null }));
-        if (hardBlockOnNav.blocked) {
-          await recoverFromBlockPage(page, config, hardBlockOnNav.reason, 'during resumeFromCurrentPage home navigation');
+    switch (detected.state) {
+      case 'internal': {
+        if (!allowNavigation) {
+          info('Internal browser page detected; navigation disabled for checkpoint resume. Waiting for page change.');
+          await page.waitForTimeout(1500);
           continue;
         }
-        // If it's a timeout error, wait 2-3 minutes and retry
-        if (/timeout|timed out/i.test(errMsg)) {
-          warn('Timeout during resumeFromCurrentPage navigation. Waiting 2-3 minutes before retry...');
-          const timeoutWaitMs = 120000 + Math.floor(Math.random() * 60000); // 2-3 minutes
-          await page.waitForTimeout(timeoutWaitMs);
-          // Retry the navigation
-          try {
-            await navigateToOfcSchedule(page, config.scheduleUrl);
-          } catch (retryErr) {
-            warn('Retry after timeout also failed:', retryErr instanceof Error ? retryErr.message : String(retryErr));
-            const hardBlockOnRetry = await isHardBlocked(page).catch(() => ({ blocked: false, reason: null }));
-            if (hardBlockOnRetry.blocked) {
-              await recoverFromBlockPage(page, config, hardBlockOnRetry.reason, 'resumeFromCurrentPage retry');
-              continue;
-            }
-            throw retryErr;
-          }
-        }
-        // If not a hard block or timeout, throw the error to be caught by the outer try-catch
-        throw e;
-      }
-      continue;
-    }
-
-    if (!state.relevant) {
-      if (!allowNavigation) {
-        info('Current page is not relevant site and navigation is disabled. Waiting for page changes.');
-        await page.waitForTimeout(1500);
+        info('Internal browser page detected. Navigating to authUrl.');
+        uiStatus('Recovering — navigating to sign-in');
+        await page.goto(config.authUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
         continue;
       }
-      info('Current page is not relevant site. Navigating to authUrl.');
-      await page.goto(config.authUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-      continue;
-    }
 
-    info('Current page is relevant but not recognized. Waiting for state changes.');
-    await page.waitForTimeout(2000);
+      case 'irrelevant': {
+        if (!allowNavigation) {
+          info('Current page is not relevant site and navigation is disabled. Waiting for page changes.');
+          await page.waitForTimeout(1500);
+          continue;
+        }
+        info('Current page is not relevant site. Navigating to authUrl.');
+        uiStatus('Recovering — navigating to sign-in');
+        await page.goto(config.authUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        continue;
+      }
+
+      case 'hard_block': {
+        // When the caller is already inside block recovery, hand the page back
+        // — re-entering recoverFromBlockPage from here would recurse.
+        if (skipHardBlockRecovery) return;
+        await recoverFromBlockPage(page, config, detected.blockReason, 'during resumeFromCurrentPage');
+        continue;
+      }
+
+      case 'login_failed': {
+        if (!allowNavigation) {
+          warn('Login failed page detected; navigation disabled for checkpoint resume. Waiting for manual/page recovery.');
+          await page.waitForTimeout(1500);
+          continue;
+        }
+        warn('Detected login failure page. Restarting from authUrl.');
+        uiStatus('Recovering — login failed, restarting sign-in');
+        await page.goto(config.authUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => null);
+        continue;
+      }
+
+      case 'login': {
+        info('Detected login page — signing in.');
+        uiStatus('Detected login page — signing in');
+        try {
+          await login(page, config);
+        } catch (e) {
+          warn('Login attempt failed during recovery:', e instanceof Error ? e.message : e);
+          await page.waitForTimeout(2000);
+        }
+        continue;
+      }
+
+      case 'privacy': {
+        info('Detected Privacy Act Statement page — consenting.');
+        uiStatus('Recovering — Privacy Act consent');
+        try {
+          await handlePrivacyActStatement(page);
+        } catch (e) {
+          warn('Privacy Act handling failed:', e instanceof Error ? e.message : e);
+          await page.waitForTimeout(2000);
+        }
+        continue;
+      }
+
+      case 'security': {
+        info('Detected security questions page — answering.');
+        uiStatus('Recovering — answering security questions');
+        try {
+          await answerSecurityQuestions(page, config.securityQuestions);
+        } catch (e) {
+          warn('Security questions handling failed:', e instanceof Error ? e.message : e);
+          await page.waitForTimeout(2000);
+        }
+        continue;
+      }
+
+      case 'home': {
+        info('Detected home page — entering schedule flow.');
+        uiStatus('Recovering — re-entering schedule');
+        try {
+          await navigateToOfcSchedule(page, config.scheduleUrl);
+        } catch (e) {
+          const errMsg = e instanceof Error ? e.message : String(e);
+          warn('Error during navigateToOfcSchedule in resumeFromCurrentPage:', errMsg);
+          // Check if the error was caused by a hard block page
+          const hardBlockOnNav = await isHardBlocked(page).catch(() => ({ blocked: false, reason: null }));
+          if (hardBlockOnNav.blocked && !skipHardBlockRecovery) {
+            await recoverFromBlockPage(page, config, hardBlockOnNav.reason, 'during resumeFromCurrentPage home navigation');
+            continue;
+          }
+          // If it's a timeout error, wait 2-3 minutes and retry
+          if (/timeout|timed out/i.test(errMsg)) {
+            warn('Timeout during resumeFromCurrentPage navigation. Waiting 2-3 minutes before retry...');
+            const timeoutWaitMs = 120000 + Math.floor(Math.random() * 60000); // 2-3 minutes
+            await page.waitForTimeout(timeoutWaitMs);
+            // Retry the navigation
+            try {
+              await navigateToOfcSchedule(page, config.scheduleUrl);
+            } catch (retryErr) {
+              warn('Retry after timeout also failed:', retryErr instanceof Error ? retryErr.message : String(retryErr));
+              const hardBlockOnRetry = await isHardBlocked(page).catch(() => ({ blocked: false, reason: null }));
+              if (hardBlockOnRetry.blocked && !skipHardBlockRecovery) {
+                await recoverFromBlockPage(page, config, hardBlockOnRetry.reason, 'resumeFromCurrentPage retry');
+                continue;
+              }
+              throw retryErr;
+            }
+          }
+          // If not a hard block or timeout, throw the error to be caught by the outer try-catch
+          throw e;
+        }
+        continue;
+      }
+
+      case 'cloudflare': {
+        info('Cloudflare or bot verification page detected. Waiting for completion.');
+        client('🌐', 'Cloudflare challenge detected — auto-solving...');
+        await waitForHumanVerificationIfNeeded(page, config.cloudflareWaitMs, config.autoSolveCloudflare, isAborted);
+        continue;
+      }
+
+      case 'ofc':
+        info('Resuming from existing OFC schedule page.');
+        return;
+
+      case 'consular':
+        info('Resuming from existing Consular schedule page (/en-US/schedule/).');
+        return;
+
+      case 'suppressed':
+        // Form withheld server-side — polling here can never fix it. Return so
+        // the caller's stage-specific suppression handler takes over
+        // (consular wire sweep / OFC cooldown re-entry).
+        info('Schedule form suppressed (account-level lock) — returning to caller for stage-specific handling.');
+        return;
+
+      case 'unknown': {
+        uiStatus('Unknown page — recovering');
+        if (allowNavigation && attempt >= 10 && unknownStage === 'poll') {
+          warn('Page not recognized after 10 checks — reloading once to re-detect.');
+          unknownStage = 'reloaded';
+          await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null);
+          continue;
+        }
+        if (allowNavigation && attempt >= 18 && unknownStage === 'reloaded') {
+          warn('Page still not recognized after reload — navigating to home page to re-anchor.');
+          unknownStage = 'homed';
+          await page.goto(getHomePageUrl(config.scheduleUrl), { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null);
+          continue;
+        }
+        info('Current page is relevant but not recognized. Waiting for state changes.');
+        await page.waitForTimeout(2000);
+        continue;
+      }
+    }
   }
 
   throw new Error('Unable to resume automation from current browser state after multiple attempts.');
@@ -1443,7 +1593,8 @@ async function main() {
     }
     process.exit(1);
   }
-  info('License valid for:', licenseResult.record?.client_name || 'unknown');
+  const licensePoc = licenseResult.record?.client_name || 'unknown';
+  info('License valid for:', licensePoc);
 
   const config = loadConfig();
   if (config.preferLeastSlots) {
@@ -1971,7 +2122,9 @@ async function main() {
             blockCycleCount = Math.max(0, blockCycleCount - 1); // no rotation was spent on this cycle
             consecutiveBlockCount = 0;
             await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null);
-            await waitForHumanVerificationIfNeeded(page, config.cloudflareWaitMs, config.autoSolveCloudflare, isAborted).catch(() => null);
+            // Route wherever the reload landed (CF challenge → login → home →
+            // schedule) — a bare CF wait can't handle a post-challenge login.
+            await resumeFromCurrentPage(page, config).catch(() => null);
             continue;
           }
           // Third consecutive 403/429 — the session/IP is likely burned.
@@ -1982,7 +2135,6 @@ async function main() {
           // Reload the page to clear stale Cloudflare session after IP rotation.
           client('🔄', 'Refreshing page after IP rotation...');
           await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null);
-          await waitForHumanVerificationIfNeeded(page, config.cloudflareWaitMs, config.autoSolveCloudflare, isAborted).catch(() => null);
 
           const delayMs = getBackoffDelayMs(blockType, 2);
           await sendMajorEventAlert(config, 'schedule_' + blockType, {
@@ -2033,7 +2185,9 @@ async function main() {
         }
         resetMemberQueryResult();
         await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null);
-        await waitForHumanVerificationIfNeeded(page, config.cloudflareWaitMs, config.autoSolveCloudflare, isAborted).catch(() => null);
+        // Route wherever the reload landed — a 429 can resolve into a login
+        // page (expired session), not just the schedule page.
+        await resumeFromCurrentPage(page, config).catch(() => null);
         // Wait for the page's own member query so its fresh verdict is
         // captured before the next iteration evaluates memberBlocked.
         await page.waitForResponse(
@@ -2070,8 +2224,10 @@ async function main() {
       }
       try {
         await page.goto(getHomePageUrl(config.scheduleUrl), { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null);
-        await waitForHumanVerificationIfNeeded(page, config.cloudflareWaitMs, config.autoSolveCloudflare, isAborted).catch(() => null);
-        await navigateToOfcSchedule(page, config.scheduleUrl);
+        // Full re-classification after the home nav — post-403 landings can be
+        // login/privacy/security, not just the schedule page. resume handles
+        // CF waits + the schedule-link click itself.
+        await resumeFromCurrentPage(page, config);
         resetMemberQueryResult();
       } catch (e) {
         const errMsg = e instanceof Error ? e.message : String(e);
@@ -2099,8 +2255,7 @@ async function main() {
           info('Retrying home recovery after timeout wait...');
           try {
             await page.goto(getHomePageUrl(config.scheduleUrl), { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null);
-            await waitForHumanVerificationIfNeeded(page, config.cloudflareWaitMs, config.autoSolveCloudflare, isAborted).catch(() => null);
-            await navigateToOfcSchedule(page, config.scheduleUrl);
+            await resumeFromCurrentPage(page, config);
           } catch (retryErr) {
             warn('Retry after timeout also failed:', retryErr instanceof Error ? retryErr.message : String(retryErr));
             // After retry failure, check for hard block again
@@ -2176,7 +2331,7 @@ async function main() {
             await rotateEgress(config, isAborted, true, `OFC app error ${code} ×${consecutiveAppErrorCount}`).catch(() => null);
           }
           await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null);
-          await waitForHumanVerificationIfNeeded(page, config.cloudflareWaitMs, config.autoSolveCloudflare, isAborted).catch(() => null);
+          await resumeFromCurrentPage(page, config).catch(() => null);
           resetMemberQueryResult();
         } else {
           warn(`[APP_ERROR] ${consecutiveAppErrorCount} consecutive app errors — Auto IP is off; continuing recovery on the same IP.`);
@@ -2212,8 +2367,7 @@ async function main() {
       }
       try {
         await page.goto(getHomePageUrl(config.scheduleUrl), { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null);
-        await waitForHumanVerificationIfNeeded(page, config.cloudflareWaitMs, config.autoSolveCloudflare, isAborted).catch(() => null);
-        await navigateToOfcSchedule(page, config.scheduleUrl);
+        await resumeFromCurrentPage(page, config);
         resetMemberQueryResult();
       } catch (e) {
         warn('App-error home recovery error:', e);
@@ -2279,7 +2433,8 @@ async function main() {
           username: config.username,
           city: currentCity,
           date: result.bookedDate || '',
-          time: result.bookedTime || ''
+          time: result.bookedTime || '',
+          poc: licensePoc
         }).catch(() => null);
 
         // Open notification video immediately on OFC success (only once).
@@ -3092,7 +3247,8 @@ async function main() {
             username: config.username,
             city: currentCity,
             date: selectedDate,
-            time: cand.time
+            time: cand.time,
+            poc: licensePoc
           }).catch(() => null);
 
           // Open notification video immediately on OFC success (only once).
