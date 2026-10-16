@@ -120,7 +120,9 @@ Human-signature layer (solver loop): ~75% of attempts are preceded by `A11yServi
 
 Escalation: 2 failed rounds → "CAPTCHA needs you" notification (deduped 5min, **full-screen intent** brings the app forward); every 4th failed round → VPN rotate + reload. `VpnManager.rotate` now prefers exits outside the burned exit's /16 — Nord egress ranges are shared across countries and CF flags the range.
 
-**Verified on-device (Samsung A26, WebView 153):** the widget accepts `dispatchGesture` taps — `cf_clearance` is issued every round (1–4 attempts). `input tap` (shell-injected events) does NOT activate the widget — synthetic events are detectably synthetic even to Turnstile. If `cf_clearance` issues but the next nav still 403s, the origin is re-challenging at policy level (site in aggressive mode affects real Chrome on residential IPs too) — rotate and keep the loop patient; no client-side fix exists for that phase.
+`__cm` bridge hygiene: `addJavascriptInterface` injects into **every frame, including the cross-origin Turnstile iframe** — `window.__cm` is a visible embedded-app marker. The engine strips it (`Driver.setBridgeEnabled(false)`) while `STATE == VERIFICATION` and restores it on any other page state (net capture only matters on real pages; a challenge page needs no bridge). On-device: ~15 consecutive pass→re-challenge loops ended with a clean pass on the first build carrying this change.
+
+**Verified on-device (Samsung A26, WebView 153):** the widget accepts `dispatchGesture` taps — `cf_clearance` is issued every round (1–4 attempts). `input tap` (shell-injected events) does NOT activate the widget. If `cf_clearance` issues but the next nav still 403s, that's a policy-level re-challenge — rotate + strip-the-bridge reloads handle it; real Chrome on a residential IP gets the same interactive challenge when the zone is in aggressive mode.
 
 ## VPN — embedded WireGuard (NordLynx)
 
