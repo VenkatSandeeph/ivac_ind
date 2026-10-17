@@ -249,6 +249,7 @@ The slot tracker (`src/slot-tracker.ts`) records every calendar visibility event
 - **Fire-and-forget**: `recordSlotObservation()` returns `void` and never blocks the booking loop. The internal `fs.appendFile` is `.catch()`-ed to swallow all errors. Recording must NEVER break or slow the booking flow.
 - **Single shared JSONL file**: all profiles write to `logs/slot-observations.jsonl` with a `profile` field for filtering. Append-only, grep-able, imports to Excel/Python/Sheets.
 - **Records both OFC and consular stages**: each observation includes the stage, city, visible dates, API state, and configured range.
+- **OFC seam = `logCitySelected`** (`src/index.ts`): the record fires when the `getScheduleDays` response arrives — the single point covering the fast path AND DOM fallback. (Bug fixed: observations previously lived in the DOM-fallback code, so the fast path — which consumes most calendar sightings — never recorded.) The API-seam record also prints the formatted date list to the client log (`📅 Calendar visible for X — N dates: ...`). `calendarMonth` is null on API-seam records (the API returns dates, not a month label) — derive the month from the dates if needed.
 
 **Output file:** `logs/slot-observations.jsonl` (one JSON object per line)
 

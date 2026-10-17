@@ -318,6 +318,13 @@ export async function runConsularWireLoop(
       client('🏙️', `Selected ${city} | Calendar Visible: ${days.length > 0}`);
       info(`[CONSULAR-WIRE] ${post.Name}: ${days.length} day(s).`);
 
+      // Formatted date list — same client line as the DOM sweep/OFC paths.
+      if (days.length > 0) {
+        const allIsos = days.map((d) => dayIso(d?.Date)).filter(Boolean) as string[];
+        const inRangeIsos = allIsos.filter((iso) => unbounded || (iso >= range.startDate && iso <= range.endDate));
+        client('📅', `Consular calendar visible for ${city} — ${allIsos.length} date(s): ${allIsos.join(', ')} (${inRangeIsos.length} in range)`);
+      }
+
       for (const d of days) {
         const iso = dayIso(d?.Date);
         if (!iso) continue;

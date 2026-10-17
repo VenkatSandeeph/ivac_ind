@@ -200,10 +200,60 @@ function abortSpecialSweep(reason: string): void {
  * — the same signal the flow uses downstream. Emitted after every
  * selectCity + schedule-response pair, including retries.
  */
-function logCitySelected(city: string, scheduleResult: { available?: boolean } | null | undefined, profile: string): void {
+function logCitySelected(
+  city: string,
+  scheduleResult: { available?: boolean; scheduleDays?: readonly unknown[]; scheduleEntries?: readonly unknown[] } | null | undefined,
+  profile: string,
+  config: AutomationConfig,
+  runId: string,
+  url: string
+): void {
   const visible = !!scheduleResult?.available;
   client('🏙️', `Selected ${city} | Calendar Visible: ${visible}`);
   recordCitySelection(profile, city, visible); // append-only per-profile file
+
+  // When the days response carried real dates, print them formatted AND record
+  // the observation — the single seam covering the fast path AND the DOM
+  // fallback (previously only the DOM fallback recorded, so most OFC calendar
+  // sightings never reached slot-observations.jsonl). Pure local work on
+  // already-captured data; recordSlotObservation is fire-and-forget — zero
+  // added latency to the booking path.
+  const days = Array.isArray(scheduleResult?.scheduleDays) ? scheduleResult.scheduleDays : [];
+  const allDates = days
+    .map(extractDate)
+    .map(normalizeToYMD)
+    .filter((d): d is string => d !== null)
+    .sort();
+  if (!visible || allDates.length === 0) return;
+
+  const { startDate, endDate } = config.appointment;
+  const inRange = allDates.filter(
+    (d) => (!startDate || d >= startDate) && (!endDate || d <= endDate)
+  );
+  let msg = `Calendar visible for ${city} — ${allDates.length} date(s) available: ${allDates.join(', ')}`;
+  if (inRange.length > 0) msg += ` (${inRange.length} in range)`;
+  client('📅', msg);
+
+  recordSlotObservation({
+    timestamp: new Date().toISOString(),
+    profile,
+    runId,
+    stage: 'ofc',
+    city,
+    url,
+    availableDates: allDates,
+    inRangeDates: inRange,
+    configuredRange: {
+      startDate,
+      endDate,
+      month: config.appointment.month,
+      year: config.appointment.year
+    },
+    apiScheduleDays: days.length,
+    apiScheduleEntries: Array.isArray(scheduleResult?.scheduleEntries) ? scheduleResult.scheduleEntries.length : 0,
+    apiAvailable: true,
+    calendarMonth: null
+  });
 }
 
 /**
@@ -630,6 +680,28 @@ async function parseManualResponse(response: any) {
 //  Smart month jump: extract earliest date from schedule API response
 // ---------------------------------------------------------------------------
 
+// Shared extractors — pull the date value out of a schedule-API item
+// (day or entry) and normalize to YYYY-MM-DD.
+const extractDate = (item: unknown): string => {
+  if (typeof item === 'string') return item;
+  if (!item || typeof item !== 'object') return '';
+  const obj = item as Record<string, unknown>;
+  for (const key of ['ScheduleDate', 'Date', 'CalendarDate', 'Day', 'SlotDate']) {
+    if (obj[key]) return String(obj[key]);
+  }
+  return '';
+};
+
+const normalizeToYMD = (raw: string): string | null => {
+  const isoMatch = raw.match(/(\d{4})-(\d{2})-(\d{2})/);
+  if (isoMatch) return isoMatch[0];
+  const usMatch = raw.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (usMatch) {
+    return `${usMatch[3]}-${usMatch[1].padStart(2, '0')}-${usMatch[2].padStart(2, '0')}`;
+  }
+  return null;
+};
+
 function extractEarliestApiDate(
   scheduleResult: { scheduleDays: readonly unknown[]; scheduleEntries: readonly unknown[] } | null | undefined,
   startDate: string,
@@ -638,26 +710,6 @@ function extractEarliestApiDate(
   if (!scheduleResult) return null;
   const { scheduleDays, scheduleEntries } = scheduleResult;
   if ((!scheduleDays || scheduleDays.length === 0) && (!scheduleEntries || scheduleEntries.length === 0)) return null;
-
-  const extractDate = (item: unknown): string => {
-    if (typeof item === 'string') return item;
-    if (!item || typeof item !== 'object') return '';
-    const obj = item as Record<string, unknown>;
-    for (const key of ['ScheduleDate', 'Date', 'CalendarDate', 'Day', 'SlotDate']) {
-      if (obj[key]) return String(obj[key]);
-    }
-    return '';
-  };
-
-  const normalizeToYMD = (raw: string): string | null => {
-    const isoMatch = raw.match(/(\d{4})-(\d{2})-(\d{2})/);
-    if (isoMatch) return isoMatch[0];
-    const usMatch = raw.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-    if (usMatch) {
-      return `${usMatch[3]}-${usMatch[1].padStart(2, '0')}-${usMatch[2].padStart(2, '0')}`;
-    }
-    return null;
-  };
 
   const allRaw = [
     ...(scheduleDays || []).map(extractDate),
@@ -1965,7 +2017,7 @@ async function main() {
         resetCapturedScheduleData();
         await selectCity(page, currentCity, true, config);
         scheduleResult = await scheduleResponsePromise;
-        logCitySelected(currentCity, scheduleResult, config.username);
+        logCitySelected(currentCity, scheduleResult, config.username, config, runId, page.url());
         noSlots = await detectNoSlots(page);
       }
     } else {
@@ -2018,7 +2070,7 @@ async function main() {
       if (!memberMissing) {
         await selectCity(page, currentCity, true, config);
         scheduleResult = await scheduleResponsePromise;
-        logCitySelected(currentCity, scheduleResult, config.username);
+        logCitySelected(currentCity, scheduleResult, config.username, config, runId, page.url());
         noSlots = await detectNoSlots(page);
       }
 
@@ -2644,7 +2696,7 @@ async function main() {
           resetCapturedScheduleData();
           await selectCity(page, currentCity, true, config);
           scheduleResult = await scheduleResponsePromise;
-          logCitySelected(currentCity, scheduleResult, config.username);
+          logCitySelected(currentCity, scheduleResult, config.username, config, runId, page.url());
           noSlots = await detectNoSlots(page);
 
           try {
@@ -2803,7 +2855,7 @@ async function main() {
             const cal = await page.locator('#datepicker, .ui-datepicker').count().then(c => c > 0).catch(() => false);
             if (cal) {
               info('Recovery: calendar is visible after reselection');
-              logCitySelected(currentCity, { available: true }, config.username);
+              logCitySelected(currentCity, { available: true }, config.username, config, runId, page.url());
               recovered = true;
               break;
             }
@@ -2821,7 +2873,7 @@ async function main() {
             const cal2 = await page.locator('#datepicker, .ui-datepicker').count().then(c => c > 0).catch(() => false);
             if (cal2) {
               info('Recovery: calendar visible after navigation');
-              logCitySelected(currentCity, { available: true }, config.username);
+              logCitySelected(currentCity, { available: true }, config.username, config, runId, page.url());
               recovered = true;
               break;
             }
@@ -2890,30 +2942,9 @@ async function main() {
           client('📅', `Calendar visible for ${currentCity} — no available dates on this month.`);
         }
 
-        // Record this OFC calendar observation to the local JSONL log.
-        // Fire-and-forget (non-blocking) — captures ALL visible green dates
-        // (availableDates) AND the in-range subset (inRangeDates) for later
-        // pattern analysis of appointment release dates/times.
-        recordSlotObservation({
-          timestamp: new Date().toISOString(),
-          profile: config.username,
-          runId,
-          stage: 'ofc',
-          city: currentCity,
-          url: page.url(),
-          availableDates: allAvailable.map(d => d.date),
-          inRangeDates: inRange.map(d => d.date),
-          configuredRange: {
-            startDate: config.appointment.startDate,
-            endDate: config.appointment.endDate,
-            month: config.appointment.month,
-            year: config.appointment.year,
-          },
-          apiScheduleDays: scheduleResult?.scheduleDays?.length ?? 0,
-          apiScheduleEntries: scheduleResult?.scheduleEntries?.length ?? 0,
-          apiAvailable: scheduleResult?.available ?? null,
-          calendarMonth: null,
-        });
+        // Slot observation already recorded at the city-select seam
+        // (logCitySelected) — the API days response is authoritative and
+        // covers every path, not just DOM fallback.
       }
 
       if (candidateDates.length === 0) {
@@ -2937,7 +2968,7 @@ async function main() {
             const schedRespPromise = waitForScheduleResponse(page, scheduleWaitMs(), tryPostId || undefined);
             await selectCity(page, tryCity, true, config);
             const tryResult = await schedRespPromise;
-            logCitySelected(tryCity, tryResult, config.username);
+            logCitySelected(tryCity, tryResult, config.username, config, runId, page.url());
 
             const tryApiDate = extractEarliestApiDate(tryResult, config.appointment.startDate, config.appointment.endDate);
             if (tryApiDate) {
@@ -2974,29 +3005,7 @@ async function main() {
               } else {
                 client('📅', `Calendar visible for ${tryCity} — no available dates on this month.`);
               }
-              // Record this OFC calendar observation for the alternate city.
-              // Fire-and-forget (non-blocking) — captures ALL visible green dates
-              // and the in-range subset.
-              recordSlotObservation({
-                timestamp: new Date().toISOString(),
-                profile: config.username,
-                runId,
-                stage: 'ofc',
-                city: tryCity,
-                url: page.url(),
-                availableDates: allAvailable.map(d => d.date),
-                inRangeDates: inRange.map(d => d.date),
-                configuredRange: {
-                  startDate: config.appointment.startDate,
-                  endDate: config.appointment.endDate,
-                  month: config.appointment.month,
-                  year: config.appointment.year,
-                },
-                apiScheduleDays: tryResult?.scheduleDays?.length ?? 0,
-                apiScheduleEntries: tryResult?.scheduleEntries?.length ?? 0,
-                apiAvailable: tryResult?.available ?? null,
-                calendarMonth: null,
-              });
+              // Observation already recorded at logCitySelected for this city.
             }
             if (candidateDates.length > 0) {
               // OFC/VAC: beep when calendar visible with available dates (other city).
