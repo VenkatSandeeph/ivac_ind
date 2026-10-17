@@ -281,7 +281,11 @@ export async function runConsularWireLoop(
         continue;
       }
       if (ci > 0) {
-        if (await wireSleep(2000 + Math.floor(Math.random() * 2000), shouldStop)) return 'stopped';
+        // Same per-city pacing as the DOM sweep — cityRetrySeconds applies
+        // between selects, not just between sweeps (see consular-schedule.ts).
+        const gapMs = retryMs + Math.floor(Math.random() * 3000);
+        client('⏳', `Consular: next city in ${(gapMs / 1000).toFixed(0)}s...`);
+        if (await wireSleep(gapMs, shouldStop)) return 'stopped';
       }
 
       const daysDto = {

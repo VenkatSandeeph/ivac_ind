@@ -415,12 +415,27 @@ async function submitConsular(
 // Consular sweep — all configured cities, one pass per call
 // =============================================================================
 
+/** Chunked sleep honoring the stop callback — mirrors wireSleep in consular-wire. */
+async function consularSleep(ms: number, shouldStop?: () => boolean): Promise<boolean> {
+  let remaining = ms;
+  while (remaining > 0) {
+    if (shouldStop?.()) return true;
+    const wait = Math.min(1000, remaining);
+    await new Promise((r) => setTimeout(r, wait));
+    remaining -= wait;
+  }
+  return shouldStop?.() === true;
+}
+
 /**
  * One consular sweep: for every configured consular city, select it, read the
  * days verdict, and — when the calendar shows in-range dates — click date →
  * time → submit immediately. Returns true only when a booking was submitted;
- * false after a full empty sweep (the outer loop waits consularCityRetrySeconds
- * and calls again).
+ * false after a full empty sweep.
+ *
+ * Pacing: consular.cityRetrySeconds applies BETWEEN cities — same semantics as
+ * the OFC cityRetrySeconds. The outer loop applies a shorter rest between
+ * full sweeps.
  *
  * Reuses the OFC DOM helpers — the consular page shares the same element ids
  * (#post_select, #datepicker, #time_select, #submitbtn) and page globals
@@ -459,15 +474,20 @@ export async function runConsularSchedule(
   // Every sweep re-emits the cached OFC-detail label — pulls once, displays always.
   uiStatus(consularStatusLabel());
 
+  // Per-city pacing — the configured delay applies between SELECTS (same
+  // semantics as OFC cityRetrySeconds), not just between sweeps. Every select
+  // fires a getScheduleDays call; the old hardcoded 2-4s inner gap packed all
+  // cities into a sub-minute burst and tripped the site rate limiter.
+  const cityGapMs = Math.max(1, config.consular?.cityRetrySeconds ?? 15) * 1000;
+
   for (let ci = 0; ci < consularCities.length; ci++) {
     if (shouldStop?.()) return false;
     const city = consularCities[ci];
 
-    // Small gap between city selects inside a sweep — each fires a
-    // getScheduleDays call; back-to-back selects look like a burst.
     if (ci > 0) {
-      const gapMs = 2000 + Math.floor(Math.random() * 2000);
-      await page.waitForTimeout(gapMs);
+      const gapMs = cityGapMs + Math.floor(Math.random() * 3000);
+      client('⏳', `Consular: next city in ${(gapMs / 1000).toFixed(0)}s...`);
+      if (await consularSleep(gapMs, shouldStop)) return false;
     }
 
     // Arm the days waiter BEFORE the select — onPostChange fires the request
