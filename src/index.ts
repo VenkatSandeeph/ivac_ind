@@ -1371,7 +1371,7 @@ async function isRelevantSite(page: any) {
 type ResumePageState =
   | 'internal' | 'irrelevant' | 'hard_block' | 'login_failed' | 'login'
   | 'privacy' | 'security' | 'home' | 'cloudflare'
-  | 'ofc' | 'consular' | 'suppressed' | 'unknown';
+  | 'ofc' | 'consular' | 'suppressed' | 'unknown' | 'browser_closed';
 
 type HardBlockReason = 'access_limitation' | 'cloudflare_blocked' | 'rate_limited' | null;
 
@@ -1380,8 +1380,30 @@ type DetectedPageState = {
   blockReason: HardBlockReason;
 };
 
+/**
+ * Local-only liveness check — page.isClosed() and browser.isConnected() are
+ * cached client-side flags, no CDP round-trip. A dead Chrome/tab otherwise
+ * masquerades as 'unknown' forever: every DOM probe's .catch(() => false)
+ * swallows the "Target closed" errors while page.url() keeps returning the
+ * stale cached URL. Checked FIRST in detectPageState so a dead browser
+ * surfaces as 'browser_closed' instead of spinning the unknown loop.
+ */
+function isBrowserGone(page: any): boolean {
+  try {
+    if (page.isClosed()) return true;
+    const b = page.context()?.browser?.();
+    return b ? !b.isConnected() : false;
+  } catch {
+    return false;
+  }
+}
+
 async function detectPageState(page: any): Promise<DetectedPageState> {
   const none = { blockReason: null as HardBlockReason };
+
+  if (isBrowserGone(page)) {
+    return { state: 'browser_closed', ...none };
+  }
 
   if (await isInternalPage(page).catch(() => false)) {
     return { state: 'internal', ...none };
@@ -1455,6 +1477,13 @@ async function resumeFromCurrentPage(
   let unknownStage: 'poll' | 'reloaded' | 'homed' = 'poll';
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    // Stop signal is honored inside recovery, not just at the main-loop seams —
+    // a churning recovery (nav timeouts, CF waits) previously left the flag file
+    // unread indefinitely, forcing the UI's 5s fallback kill.
+    if (checkStopSignal()) {
+      info('Stop signal detected during page-state recovery — exiting.');
+      await gracefulExit(config);
+    }
     const detected = await detectPageState(page);
     const currentUrl = page.url();
     const currentTitle = await page.title().catch(() => '');
@@ -1560,7 +1589,11 @@ async function resumeFromCurrentPage(
           if (/timeout|timed out/i.test(errMsg)) {
             warn('Timeout during resumeFromCurrentPage navigation. Waiting 2-3 minutes before retry...');
             const timeoutWaitMs = 120000 + Math.floor(Math.random() * 60000); // 2-3 minutes
-            await page.waitForTimeout(timeoutWaitMs);
+            // setTimeout-based wait (not page.waitForTimeout) — honors the stop
+            // signal every second AND works even when the page/browser is dead.
+            if (await sleepWithStopSignal(timeoutWaitMs)) {
+              await gracefulExit(config);
+            }
             // Retry the navigation
             try {
               await navigateToOfcSchedule(page, config.scheduleUrl);
@@ -1601,6 +1634,14 @@ async function resumeFromCurrentPage(
         // (consular wire sweep / OFC cooldown re-entry).
         info('Schedule form suppressed (account-level lock) — returning to caller for stage-specific handling.');
         return;
+
+      case 'browser_closed': {
+        // Chrome or the tab is gone — same exit the existing browser-closed
+        // seams use (reconnectBrowser → process.exit(0)). Never returns.
+        warn('[BROWSER_CLOSED] Browser or tab closed — exiting.');
+        await reconnectBrowser(config);
+        return;
+      }
 
       case 'unknown': {
         uiStatus('Unknown page — recovering');

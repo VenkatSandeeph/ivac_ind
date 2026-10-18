@@ -523,6 +523,7 @@ async function startProfile(profileId) {
 
   rec = {
     process: child,
+    useShell: useShell,
     log: (rec && rec.log) || '',
     status: 'starting',
     checkpoints: {},
@@ -563,7 +564,16 @@ function stopProfile(profileId) {
       appendLog(profileId, '[UI] Forcing stop (fallback)...\n');
       try {
         if (process.platform === 'win32') {
-          exec('taskkill /pid ' + pid + ' /F', { windowsHide: true });
+          // Shell-spawned (dev/tsx): the tracked pid is the cmd.exe wrapper —
+          // /T kills the wrapper's whole tree incl. the real node process.
+          // Packaged (direct ivac-core.exe): plain /F suffices and MUST NOT use
+          // /T — Chrome is a child of the core and a tree kill would close it.
+          const tk = still.useShell
+            ? 'taskkill /pid ' + pid + ' /T /F'
+            : 'taskkill /pid ' + pid + ' /F';
+          exec(tk, { windowsHide: true }, (err) => {
+            if (err) appendLog(profileId, '[UI] Force-kill failed: ' + err.message + '\n');
+          });
         } else {
           still.process.kill('SIGKILL');
         }
