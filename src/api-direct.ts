@@ -1130,6 +1130,7 @@ async function submitViaPageFunction(
 
     if (!retrySelector) {
       warn(`[FAST FLOW] Phase 3: could not find radio button for Num=${entry.Num}`);
+      client('❌', 'Could not select that time slot — moving on...');
       return { success: false, error: 'radio button not found' };
     }
   }
@@ -1164,6 +1165,7 @@ async function submitViaPageFunction(
   const radioClickStart = Date.now();
   if (!finalRadioSelector) {
     warn('[FAST FLOW] Phase 3: no radio selector available');
+    client('❌', 'Could not select that time slot — moving on...');
     return { success: false, error: 'radio button not found' };
   }
 
@@ -1272,6 +1274,7 @@ async function submitViaPageFunction(
   // live request — abandoning then racing it (wire/DOM retry) is worse.
   if (!submitResponse && pendingOfcSubmits > 0) {
     info('[FAST FLOW] Phase 3: response wait expired but submit still in flight — waiting up to 10s more...');
+    client('⏳', 'Server is slow — still waiting for the answer...');
     submitResponse = await page.waitForResponse(
       (resp: any) => {
         try {
@@ -1293,11 +1296,13 @@ async function submitViaPageFunction(
       if (respStatus === 524) {
         const elapsed = Date.now() - submitStart;
         warn(`[FAST FLOW] Phase 3: server timeout (HTTP 524) after ${elapsed}ms — server overloaded`);
+        client('❌', 'Server timed out — moving on...');
         return { success: false, error: 'server_timeout_524' };
       }
       if (respStatus === 429) {
         const elapsed = Date.now() - submitStart;
         warn(`[FAST FLOW] Phase 3: rate limited (HTTP 429) after ${elapsed}ms`);
+        client('❌', 'Rate limited by the server — slowing down...');
         return { success: false, error: 'rate_limited_429' };
       }
 
@@ -1309,8 +1314,6 @@ async function submitViaPageFunction(
         if (parsed.HasError && !parsed.AllScheduled) {
           const errMsg = parsed.Errors?.m_StringValue || 'unknown error';
           warn(`[FAST FLOW] Phase 3: submit FAILED — ${errMsg}`);
-          // Client log = verdict only; the raw server message stays in warn().
-          client('❌', 'Submit failed — checking for another slot…');
           // 'slot_gone' = the slot was taken by someone else between our
           // entries read and our submit. The date may still have inventory —
           // the caller retries on the page's post-failure entries refresh.
@@ -1320,6 +1323,14 @@ async function submitViaPageFunction(
           const code = /no longer available/i.test(errMsg)
             ? 'slot_gone' as const
             : /too many requests/i.test(errMsg) ? 'throttled' as const : undefined;
+          // Client log = verdict only; the raw server message stays in warn().
+          if (code === 'slot_gone') {
+            client('❌', `Slot at ${entry.Time} was taken — checking for another...`);
+          } else if (code === 'throttled') {
+            client('⏱️', 'Server busy — it is processing too many requests...');
+          } else {
+            client('❌', `Submit failed: ${errMsg}`);
+          }
           return { success: false, error: errMsg, code };
         }
         if (parsed.AllScheduled) {
@@ -1349,6 +1360,7 @@ async function submitViaPageFunction(
   }
 
   warn(`[FAST FLOW] Phase 3: submit did not navigate to consular page (url=${finalUrl}, ${elapsed}ms)`);
+  client('❌', 'No answer from the server — moving on...');
   return { success: false, error: 'did not navigate to consular page' };
 }
 
@@ -1698,10 +1710,12 @@ export async function runDirectOfcFlow(page: Page, config: AutomationConfig): Pr
   const datesReordered = matchingDates !== filteredDates;
   if (matchingDates.length === 0) {
     info('[FAST FLOW] No dates matching configured range');
+    client('📅', 'Calendar has dates, but none in your configured range — waiting for more...');
     return { success: false, fallback: false, reason: 'no_dates_in_range' };
   }
 
   info(`[FAST FLOW] ${matchingDates.length} date(s) in range: ${matchingDates.map(d => d.Date.substring(0, 10)).join(', ')}`);
+  client('📅', `${matchingDates.length} date(s) in your range — checking now...`);
 
   // If we already have captured entries (from a previous date click), skip the delay
   const hasCapturedEntries = capturedScheduleEntries && capturedScheduleEntries.length > 0;
@@ -1717,13 +1731,19 @@ export async function runDirectOfcFlow(page: Page, config: AutomationConfig): Pr
   for (let di = 0; di < matchingDates.length; di++) {
     const date = matchingDates[di];
     const isLastDate = di === matchingDates.length - 1;
+    const dateStr10 = date.Date.substring(0, 10);
 
     // Phase 2: Click date and capture entries
+    client('📅', `Checking ${dateStr10} for time slots...`);
     const entriesResult = await clickDateAndGetEntries(page, date);
     if (!entriesResult || entriesResult.entries.length === 0) {
-      info(`[FAST FLOW] No time slots for ${date.Date.substring(0, 10)}, moving to next date`);
+      info(`[FAST FLOW] No time slots for ${dateStr10}, moving to next date`);
+      const tail = isLastDate ? 'no more dates in range' : 'checking next date...';
+      client('📅', entriesResult
+        ? `No time slots on ${dateStr10} — ${tail}`
+        : `No response for ${dateStr10} — ${tail}`);
       // EXPERIMENTAL
-      recordDateExperiment({ type: 'outcome', path: 'fast', profile: config.username, postId: ctx.postId, date: date.Date.substring(0, 10), pos: di + 1, promoted: datesReordered && di === 0, result: entriesResult ? 'no_entries' : 'no_response' });
+      recordDateExperiment({ type: 'outcome', path: 'fast', profile: config.username, postId: ctx.postId, date: dateStr10, pos: di + 1, promoted: datesReordered && di === 0, result: entriesResult ? 'no_entries' : 'no_response' });
       continue;
     }
 
@@ -1735,14 +1755,15 @@ export async function runDirectOfcFlow(page: Page, config: AutomationConfig): Pr
     const eligibleEntries = sortedEntries.filter(e => e.EntriesAvailable >= memberCount);
     info(`[FAST FLOW] ${sortedEntries.length} time slot(s) for ${date.Date.substring(0, 10)} (${eligibleEntries.length} seat-eligible): ${sortedEntries.map(e => `${e.Time}(avail=${e.EntriesAvailable})`).join(', ')}`);
     if (eligibleEntries.length === 0) {
-      info(`[FAST FLOW] All slots on ${date.Date.substring(0, 10)} below member count ${memberCount} — next date`);
+      info(`[FAST FLOW] All slots on ${dateStr10} below member count ${memberCount} — next date`);
+      client('📅', `Slots on ${dateStr10} have fewer seats than your group needs — ${isLastDate ? 'no more dates in range' : 'checking next date...'}`);
       // EXPERIMENTAL
-      recordDateExperiment({ type: 'outcome', path: 'fast', profile: config.username, postId: ctx.postId, date: date.Date.substring(0, 10), pos: di + 1, promoted: datesReordered && di === 0, result: 'no_eligible', entries: sortedEntries.length });
+      recordDateExperiment({ type: 'outcome', path: 'fast', profile: config.username, postId: ctx.postId, date: dateStr10, pos: di + 1, promoted: datesReordered && di === 0, result: 'no_eligible', entries: sortedEntries.length });
       continue;
     }
     {
       const best = eligibleEntries[0];
-      client('🎯', `Slot found! Date: ${date.Date.substring(0, 10)}, Time: ${best.Time}, Availability: ${best.EntriesAvailable}`);
+      client('🎯', `${eligibleEntries.length} slot(s) on ${dateStr10} — trying ${best.Time} (${best.EntriesAvailable} seats)`);
     }
 
     // Phase 3: Submit the BEST slot for this date.
@@ -1758,9 +1779,8 @@ export async function runDirectOfcFlow(page: Page, config: AutomationConfig): Pr
     // If only 1 date is available and it fails, we return all_exhausted so
     // the caller re-selects the city (full refresh, new getScheduleDays).
     const entry = eligibleEntries[0]; // best seat-eligible slot
-    const dateStr10 = date.Date.substring(0, 10);
     info(`[FAST FLOW] Submitting best slot for ${dateStr10}: '${entry.Time}' (Num=${entry.Num}, avail=${entry.EntriesAvailable})`);
-    client('⏳', `Submitting OFC appointment for ${dateStr10} at ${entry.Time}...`);
+    client('⏳', `Submitting ${dateStr10} at ${entry.Time} — waiting for server...`);
 
     const confirmBooking = async (r: { redirectStub?: string }, d: ScheduleDay, e: ScheduleEntry): Promise<DirectApiResult> => {
       const elapsed = Date.now() - flowStart;
@@ -1815,7 +1835,7 @@ export async function runDirectOfcFlow(page: Page, config: AutomationConfig): Pr
       if (result.code === 'throttled') {
         const coolMs = 20000 + Math.floor(Math.random() * 10000);
         info(`[FAST FLOW] Server throttled submit — cooling off ${(coolMs / 1000).toFixed(0)}s before same-date retry`);
-        client('⏱️', `Server busy — retrying ${dateStr10} in ${(coolMs / 1000).toFixed(0)}s…`);
+        client('⏱️', `Server busy — waiting ${(coolMs / 1000).toFixed(0)}s before retrying ${dateStr10}...`);
         await page.waitForTimeout(coolMs);
       }
 
@@ -1831,9 +1851,7 @@ export async function runDirectOfcFlow(page: Page, config: AutomationConfig): Pr
       if (retryCands.length > 0) {
         const next = retryCands[0];
         info(`[FAST FLOW] Post-failure refresh: ${retryCands.length} slot(s) remain on ${dateStr10} — retrying '${next.Time}' (Num=${next.Num}, avail=${next.EntriesAvailable})`);
-        client('🔁', result.code === 'slot_gone'
-          ? `Slot taken — retrying ${dateStr10} at ${next.Time}…`
-          : `Retrying ${dateStr10} at ${next.Time}…`);
+        client('🔁', `Retrying ${dateStr10} at ${next.Time}...`);
         // Brief settle so the refreshed time table finishes rendering.
         await page.waitForTimeout(600);
         const retryResult = await submitViaPageFunction(page, next, snap!.token, { responseTimeoutMs: 30000 });
@@ -1852,6 +1870,7 @@ export async function runDirectOfcFlow(page: Page, config: AutomationConfig): Pr
     const errStr = (result.error || '').toLowerCase();
     if (errStr.includes('pse0602') || errStr.includes('pse0612') || errStr.includes('pse0610')) {
       warn(`[FAST FLOW] Hard error — stopping submit attempts for this city`);
+      client('⚠️', 'Server reported a permanent error — skipping this city...');
       return { success: false, fallback: false, reason: 'hard_error' };
     }
 
@@ -1869,11 +1888,11 @@ export async function runDirectOfcFlow(page: Page, config: AutomationConfig): Pr
       await page.waitForTimeout(10000);
     }
 
-    // Brief pause between dates (rate-limit avoidance)
+    // Verdict for the date, then a brief pause (rate-limit avoidance)
+    client('❌', `Booking not confirmed for ${dateStr10} — ${isLastDate ? 'no more dates in range' : 'trying next date...'}`);
     if (!isLastDate) {
       const gapMs = 1000 + Math.floor(Math.random() * 1000);
       info(`[FAST FLOW] Moving to next date, waiting ${gapMs}ms`);
-      client('📅', `Moving to next date...`);
       await page.waitForTimeout(gapMs);
     }
   }
