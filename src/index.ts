@@ -35,6 +35,7 @@ import {
 } from './calendar';
 import { waitForScheduleResponse } from './schedule-api';
 import { runConsularSchedule } from './consular-schedule';
+import { isOnConfirmationPage, sendConfirmationPdfToTelegram } from './confirmation';
 import { runConsularWireLoop } from './consular-wire';
 import { sendSupabaseEvent } from './supabase';
 import { sendOfcBookedNotification, sendTelegramMessage } from './telegram';
@@ -411,6 +412,16 @@ async function runConsularStageWithRecovery(
       consularOfcDetours = 0;
     }
     if (!onConsular) {
+      // A successful consular submit redirects to /appointment-confirmation —
+      // reaching it from ANY path means the booking already happened (even if
+      // the submit verdict was lost mid-navigation, e.g. wire eval context
+      // destroyed). Confirm + notify instead of "recovering" away from it.
+      if (isOnConfirmationPage(page)) {
+        info('Consular monitoring: page is on appointment-confirmation — booking confirmed.');
+        client('✅', 'CONSULAR BOOKED! Confirmation page reached.');
+        await sendConfirmationPdfToTelegram(page, config);
+        return true;
+      }
       // Server withheld the scheduling form (account-level lock — skeleton
       // page with only #error_row, no #page_form). Handle before the generic
       // recovery, which would otherwise poll the formless page forever.

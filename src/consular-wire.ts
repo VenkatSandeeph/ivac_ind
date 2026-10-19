@@ -2,7 +2,7 @@ import type { Page } from 'patchright';
 import { info, warn, client, uiStatus, backendError, debug } from './logger';
 import type { AutomationConfig } from './config';
 import { resolveConsularRange, scrapeOfcAppointment, consularStatusLabel } from './consular-schedule';
-import { sendConfirmationPdfToTelegram } from './confirmation';
+import { sendConfirmationPdfToTelegram, waitForConfirmationPage } from './confirmation';
 import { sendSupabaseEvent } from './supabase';
 import { playBeep } from './beep';
 import { recordSlotObservation } from './slot-tracker';
@@ -412,7 +412,21 @@ export async function runConsularWireLoop(
           Num: entry.Num
         };
         const sr = await wirePost(page, '/api/v1/schedule-group/schedule-consular-appointments-for-family', submitDto, env.appd);
-        if (!sr) return 'exit'; // context died — likely a navigation (maybe the submit's own redirect)
+        if (!sr) {
+          // A SUCCESSFUL submit kills this eval — the site redirects to
+          // /en-US/appointment-confirmation mid-call, destroying the JS
+          // context, so wirePost resolves null. Check for that redirect
+          // before treating null as a dead context (DOM path does the same
+          // at submitConsular's "landed on confirmation page" check).
+          const booked = await waitForConfirmationPage(page, 10000).catch(() => false);
+          if (booked) {
+            client('✅', `CONSULAR BOOKED! ${cand.postName} — Date=${cand.iso} Time=${entry.Time}`);
+            info('[CONSULAR-WIRE] submit eval died but page reached appointment-confirmation — counting as booked');
+            await sendConfirmationPdfToTelegram(page, config);
+            return 'booked';
+          }
+          return 'exit'; // context died with no confirmation redirect
+        }
         if (!sr.ok) {
           backendError('consular-wire/submit', sr.status ?? null, null, (sr.body || '').substring(0, 160));
           if (sr.status === 403 || sr.status === 429) {
