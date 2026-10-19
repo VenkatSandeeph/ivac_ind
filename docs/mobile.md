@@ -171,11 +171,22 @@ Guards: `rotating` in-flight flag, `!paused`, `!domFallbackActive` (DOM cycle sh
 
 **Consent:** first tunnel-up needs the Android VpnService consent dialog (`VpnManager.prepareIntent`); `rotate()` refuses silently while consent is missing.
 
+## Static proxy mode — `StaticProxies.kt`
+
+Android port of `src/static-proxy.ts`. Desktop launches Chrome with `--proxy-server` pointing at a local CONNECT relay; WebView has no launch flags, so the equivalent is the **app-scoped `androidx.webkit.ProxyController`** — `setProxyOverride` applies to every WebView in this process without a relaunch or reload.
+
+- **Modes** — Settings → "IP mode": `auto` (embedded WG, default) / `static` (upstream proxies) / `none`. Stored as `ip_mode`; the engine funnels every rotation trigger through `rotateEgress()`/`egressConfigured()` so all strike ladders (403/429, silent-block, hard-block stage-2, CF-stuck, origin-hung, app-error) rotate the proxy in static mode exactly where they'd rotate the tunnel in auto mode. The tunnel watchdog is gated to `auto` (there is no tunnel in static).
+- **List format** — identical to `proxies.txt`: `[protocol://]host:port[:user:pass]`, `#` comments, `:` allowed in passwords, malformed lines skipped. Entered in Settings or seeded once via `filesDir/proxies.txt` bootstrap (deleted after import). Credentials live only in the encrypted store and `Entry.label` never includes them.
+- **Verify** — `verify()` opens the proxy directly (TCP → HTTP CONNECT with `Proxy-Authorization` or SOCKS5 greeting+auth → TLS wrap → `GET api.ipify.org`), returning the egress IP the site will see. `rotate()` walks the list round-robin from `proxy_index`, applies the first working upstream, and pulls the WG tunnel down if it's up so the route is purely direct→proxy.
+- **Auth** — Chromium surfaces the upstream's 407 through `WebViewClient.onReceivedHttpAuthRequest`; `StaticProxies.authFor(host)` answers with the current entry's creds when the challenge host matches the proxy.
+- **Startup** — `runLoop` calls `StaticProxies.ensure` before `Js.INIT` when `ip_mode=static`: all proxies dead → notify + pause (never runs the session on the real IP).
+- **Known limits vs desktop** — the override is process-wide for *our* WebViews (fine — profiles already share one egress); in-flight sockets keep the old upstream until they close; Chromium does not support SOCKS5 *username/password* auth (no-auth SOCKS5 works). Same-exit-IP candidate is skipped during rotation unless it's the only one left.
+
 ## Persistence — `Store`
 
 - AES-256-GCM key generated once in AndroidKeyStore (alias `ivac_profiles_key`, never leaves TEE); ciphertext in SharedPreferences. Blob = Base64(12B IV + CT).
 - `profiles_v2` — encrypted `Profile[]` JSON (one-time migrates legacy plaintext `profiles` key).
-- `set_<key>` — encrypted settings: `wg_privkey`, `nord_token`, `wg_servers`, `vpn_ip`, `tg_token`, `tg_chat`, `spoc`, `running_profile`, `a11y_asked`, `battery_asked`, `special_window`.
+- `set_<key>` — encrypted settings: `wg_privkey`, `nord_token`, `wg_servers`, `vpn_ip`, `tg_token`, `tg_chat`, `spoc`, `running_profile`, `a11y_asked`, `battery_asked`, `special_window`, `ip_mode`, `proxy_list`, `proxy_index`, `proxy_ip`.
 - `importDesktopConfig(json)` — parses desktop `config.local.json`, **merges by id/username** preserving `dryRun`/`enabled`/`cityRetrySeconds`.
 - `profiles_import.json` bootstrap — `MainActivity.onCreate` imports `filesDir/profiles_import.json` if present, then deletes it (how `adb push`/`run-as` seeding works).
 
