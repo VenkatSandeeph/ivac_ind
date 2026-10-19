@@ -77,12 +77,13 @@ stateDiagram-v2
     HOME --> detect: NAV_SCHEDULE
     OFC --> detect: ofcLoop city cycle
     CONSULAR --> detect: ofcLoop city cycle (VAC-stripped)
-    UNKNOWN --> detect: wait; reload after 30 rounds
+    SUPPRESSED --> detect: handleSuppressed (OFC re-entry/cooldown | consular wire)
+    UNKNOWN --> detect: wait 10 polls → reload once → site root (bounded)
     OFC --> CONSULAR: booked → continue (not stop)
     CONSULAR --> [*]: consular booked
 ```
 
-Priority order inside `PageInfo.state`: verify → queue → rateLimited → blockReason → errorPage → privacy → secQ → login → OFC/consular → home → unknown.
+Priority order inside `PageInfo.state`: queue → rateLimited → blockReason → errorPage → privacy → secQ → login → home → **suppressedMsg** → verify → OFC/consular → unknown. App-state checks run BEFORE `verify` (desktop `68cfd49` parity — a stale CF marker must not hide a real application page); `suppressedMsg` sits between home and verify — its marker is structural (`#main_container` + `#error_row` + no `#page_form`/`#post_select`), which a CF page can never produce.
 
 `STATE` classification mirrors desktop `isHardBlocked`: CF selectors (`#cf-error-details`, `#cf-wrapper`, `.cf-subheadline` containing the domain) → `cloudflare_blocked`; title/body regexes → `access_limitation` / `cloudflare_blocked` / `rate_limited`. Additional signals: `queue` (virtual-queue texts — never reloaded), `cfSolved` (`cf-turnstile-response`/`cf_challenge_response` token populated — definitive solve verdict), `loginFailed` (`ExternalAuthenticationFailed` URL or sign-in-failed text → pause instead of blind retries).
 
@@ -98,9 +99,17 @@ Priority order inside `PageInfo.state`: verify → queue → rateLimited → blo
 8. Outcomes: OFC `booked` → `Telegram.sendOfcBooked` + beep + `Checkpoint.save("ofc-booked")` → **returns to runLoop which continues into the consular stage**; consular `booked` → `Telegram.sendConsularBooked` + stop; `taken`/`HasError` → next time slot; `left` → outer loop resumes.
 9. Next city after `computeRetryDelay` — full desktop special-window port: `:58`-of-minute triggers **12, 25, 29, 36, 49, 55, 59** on the **local system clock**, `preciseSleepUntilSpecialWindow` (~ms precision), and `beginSpecialSweep` multi-city sweep (all desired cities once each, 2-4s gaps, 60s-per-city cap, `abortSpecialSweep` on a wedged response).
 
-After OFC success the engine waits for the site redirect to `/en-US/schedule/` (up to 2min — never re-runs the OFC cycle, avoiding double-book). The first CONSULAR detection per run fires `Telegram.sendConsularStage` once, then the same DOM cycle books consular slots.
+After OFC success the engine waits for the site redirect to `/en-US/schedule/` (never re-runs the OFC cycle, avoiding double-book). If the redirect hasn't landed after 2min it **re-enters via home** (`reenterViaHome` — the site routes by session state) with a growing backoff (15s×streak, cap 120s) instead of waiting forever. The first CONSULAR detection per run fires `Telegram.sendConsularStage` once, then the same DOM cycle books consular slots.
 
-**Consular stage (desktop `consular-schedule.ts` parity):** dedicated `profile.consular` config — `cities` (empty → OFC cities minus " VAC"), `startDate`/`endDate` (empty → **earliest available**, unbounded — the site never renders dates earlier than the booked OFC appointment), `cityRetrySeconds` (default 15). Cadence: all consular cities swept per pass with 2–4s gaps; the retry delay applies only between full sweeps. Status shows the booked OFC appointment scraped once from `window.ofcAppointments[0].appointmentDateStr` (`Consular — OFC: <date>`). Same DOM contract as OFC (`#post_select`, `#time_select`, `#submitbtn`, `jsdata.Num`); consular routes land in the same response channels, so the submit verdict stays response-aware. On consular success → `confirmationPdfFlow()` (below).
+**Consular stage (desktop `consular-schedule.ts` parity):** dedicated `profile.consular` config — `cities` (empty → OFC cities minus " VAC"), `startDate`/`endDate` (empty → **earliest available**, unbounded — the site never renders dates earlier than the booked OFC appointment), `cityRetrySeconds` (default 15). Cadence (desktop `4b56ef3` parity): `cityRetrySeconds`+jitter applies between **every** city select and between sweeps — the old 2–4s inner gap burst-fired all `getScheduleDays` calls inside a minute and tripped the rate limiter. Status shows the booked OFC appointment scraped once from `window.ofcAppointments[0].appointmentDateStr` (`Consular — OFC: <date>`). Same DOM contract as OFC (`#post_select`, `#time_select`, `#submitbtn`, `jsdata.Num`); consular routes land in the same response channels, so the submit verdict stays response-aware. On consular success → `confirmationPdfFlow()` (below).
+
+### Form-suppressed schedule page + consular wire mode
+
+Desktop `e86e58a`/`60ea239` parity — the site can serve the schedule-page skeleton **without the form** (server-side scheduling lock: `#main_container` + `#error_row`, no `#page_form`/`#post_select`). `STATE.suppressedMsg` detects it (URL on `/ofc-schedule|/schedule`, `readyState==='complete'`, double-probed ~2s apart by `handleSuppressed`).
+
+- **OFC stage** → one immediate `reenterViaHome` re-entry; if suppression persists → once-per-episode local `notifyEvent` + 15min cooldown between re-entries. **Never rotates IP** — account-scoped, not IP-scoped. Flags reset the moment a real form renders.
+- **Consular stage** → `runConsularWireLoop()` — port of `src/consular-wire.ts`. The session's API endpoints still answer on the skeleton page, so the engine books via direct POSTs without the DOM form: `WIRE_ENV` scrapes `appd`/`primaryId`/`applications`/`isReschedule`/`membersRoute` from the page HTML each sweep → `query-consular-posts` (session health check) → `get-family-consular-schedule-days` per city (same `cityRetrySeconds` pacing, `SlotLog.record` on every response) → global earliest in-range day → `get-family-consular-schedule-entries` → first entry with `EntriesAvailable >= applications.size` → `schedule-consular-appointments-for-family` with the **entries-level Token** (days token is stale — PSE0601). `AllScheduled` → `sendConsularBooked` + `RedirectStub` nav → normal `confirmationPdfFlow`. `PSE0612/PSE0602` on submit = account-level lock → `locked` → 15min cooldown.
+- Wire POSTs fire through the page's own jQuery (`Js.wirePost` — identical URL/body shape as the site's scripts, `parameters=<json>` form-encoded); responses return through the XHR interception layer correlated by a `&ivacwire=<id>` marker — they do NOT feed `schedDaysChan`/`schedEntriesChan` (a DOM loop resuming after wire exit could consume a stale wire-days body as a fresh post context). Wire exits on: form restored, page left the site, env-scrape failures ×6, or CF 403/429 streak ×3 → outer loop re-classifies.
 
 `dryRun=true` never clicks the final submit (JS still performs date/time selection).
 
@@ -166,7 +175,7 @@ Guards: `rotating` in-flight flag, `!paused`, `!domFallbackActive` (DOM cycle sh
 
 - AES-256-GCM key generated once in AndroidKeyStore (alias `ivac_profiles_key`, never leaves TEE); ciphertext in SharedPreferences. Blob = Base64(12B IV + CT).
 - `profiles_v2` — encrypted `Profile[]` JSON (one-time migrates legacy plaintext `profiles` key).
-- `set_<key>` — encrypted settings: `wg_privkey`, `nord_token`, `wg_servers`, `vpn_ip`, `tg_token`, `tg_chat`, `running_profile`, `a11y_asked`, `battery_asked`, `special_window`.
+- `set_<key>` — encrypted settings: `wg_privkey`, `nord_token`, `wg_servers`, `vpn_ip`, `tg_token`, `tg_chat`, `spoc`, `running_profile`, `a11y_asked`, `battery_asked`, `special_window`.
 - `importDesktopConfig(json)` — parses desktop `config.local.json`, **merges by id/username** preserving `dryRun`/`enabled`/`cityRetrySeconds`.
 - `profiles_import.json` bootstrap — `MainActivity.onCreate` imports `filesDir/profiles_import.json` if present, then deletes it (how `adb push`/`run-as` seeding works).
 
@@ -174,7 +183,7 @@ Guards: `rotating` in-flight flag, `!paused`, `!domFallbackActive` (DOM cycle sh
 
 - `AutomationService` — foreground notification ("IVAC running" + live status via `updateStatus`) with **Pause/Resume/Stop action buttons** (app-internal broadcasts to `MainActivity`'s non-exported receiver); 12h partial wake lock; `START_STICKY`.
 - Event notifications — channel `ivac_events` (HIGH): CAPTCHA-needed, calendar-open, booked, IP-blocked, error loops. CAPTCHA-needed carries a **full-screen intent** (`USE_FULL_SCREEN_INTENT`) that brings the app forward for the manual tap. **These are Android-local only — `notifyEvent` no longer mirrors to Telegram.**
-- `Telegram` — hardcoded desktop bot token/channel as defaults; `configure(store)` applies SET-dialog overrides (`tg_token`, `tg_chat`). **Telegram fires on exactly 3 events**: `sendOfcBooked` (confirmed `appointments-for-family` 2xx / booked outcome), `sendConsularStage` (first consular-page detection per run), `sendConsularBooked`. Nothing else ever reaches the channel.
+- `Telegram` — hardcoded desktop bot token/channel as defaults; `configure(store)` applies SET-dialog overrides (`tg_token`, `tg_chat`, `spoc` — license-holder attribution, desktop `licensePoc` parity). Timestamps are IST (`istTimestamp()`, `cef028e` parity) and all messages use `Client User` + `SPOC` labels. **Telegram fires on exactly 4 events**: `sendOfcBooked`, `sendConsularStage` (first consular detection per run — DOM or wire path), `sendConsularBooked`, and `sendConsularSubmittedNoPdf` (text-only fallback when a confirmed consular submit's confirmation page never loads — `0e60791` parity). Nothing else ever reaches the channel.
 - `SlotLog` — `filesDir/slot-observations.jsonl`, schema mirrors desktop `slot-tracker.ts` (`timestamp/profile/stage/city/availableDates/inRangeDates`).
 - `Checkpoint` — `filesDir/checkpoint.json`, last detected state + city + URL per loop iteration (desktop `checkpoint.ts` parity — forensic post-mortem; the engine re-derives state from the live page on resume, no fast-resume needed).
 
