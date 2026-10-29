@@ -1071,13 +1071,13 @@ async function probeGroupMembersMissing(page: Page): Promise<boolean> {
 //  Special Window run gate
 // ---------------------------------------------------------------------------
 // When enabled, the main loop runs ONLY inside fixed system-clock windows
-// (:20–:30 and :50–:00 each hour) and freezes — zero page/API activity —
+// (:20–:35 and :50–:05 each hour) and freezes — zero page/API activity —
 // between them. Live state comes from a flag file written by the UI
 // (.ivac-special-window, "on"/"off"); when the file is absent the saved
 // config value (settings.specialWindowOnly) decides.
 const SPECIAL_WINDOW_FLAG_FILE = path.resolve(process.cwd(), '.ivac-special-window');
 const RUN_WINDOW_STARTS_MIN = [20, 50];
-const RUN_WINDOW_LEN_MIN = 10;
+const RUN_WINDOW_LEN_MIN = 15;
 
 function specialWindowEnabled(config: AutomationConfig): boolean {
   try {
@@ -1091,7 +1091,9 @@ function specialWindowEnabled(config: AutomationConfig): boolean {
 
 function inRunWindow(nowMs: number): boolean {
   const m = new Date(nowMs).getMinutes();
-  return RUN_WINDOW_STARTS_MIN.some((s) => m >= s && m < s + RUN_WINDOW_LEN_MIN);
+  // Modulo distance from each window start — the :50 window wraps past :00
+  // into :00–:05 of the next hour, which getMinutes() alone cannot express.
+  return RUN_WINDOW_STARTS_MIN.some((s) => ((m - s + 60) % 60) < RUN_WINDOW_LEN_MIN);
 }
 
 function nextRunWindowStartMs(nowMs: number): number {
@@ -1828,7 +1830,7 @@ async function main() {
     info('Slot selection mode: LEAST available slots first (preferLeastSlots enabled)');
   }
   if (config.specialWindowOnly) {
-    info('Special Window mode ON: loop runs only inside :20–:30 / :50–:00 system-clock windows (.ivac-special-window flag can toggle live).');
+    info('Special Window mode ON: loop runs only inside :20–:35 / :50–:05 system-clock windows (.ivac-special-window flag can toggle live).');
   }
   if (!config.autoRotateIp) {
     info('Auto IP disabled — IP never rotates automatically; soft 403/429 cool down 60s, hard blocks stop the profile');
