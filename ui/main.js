@@ -39,6 +39,7 @@ let mainWindow = null;
 let licenseValidated = false;
 let licenseClientName = '';
 const STOP_SIGNAL_FILE_BASE = path.join(PROJECT_ROOT, '.ivac-stop');
+const START_SIGNAL_FILE_BASE = path.join(PROJECT_ROOT, '.ivac-start');
 // Live flag file for the Special Window toggle. Running
 // cores read this each loop iteration — "on"/"off" — so the checkbox pauses
 // and resumes profiles without a restart.
@@ -56,6 +57,9 @@ const MAX_LOG_SIZE = 500_000;
 
 function getStopSignalFile(profileId) {
   return STOP_SIGNAL_FILE_BASE + '-' + (profileId || 'default');
+}
+function getStartSignalFile(profileId) {
+  return START_SIGNAL_FILE_BASE + '-' + (profileId || 'default');
 }
 
 // ---- single instance lock ----
@@ -200,6 +204,10 @@ function appendLog(profileId, text) {
     return;
   }
 
+  // While paused the core emits [LISTEN] observations — don't let keyword
+  // guesses flip 'Stopped' to 'Consular'/'Blocked' etc. Only a resume can.
+  if (rec.paused && !str.includes('[RESUMED]')) return;
+
   if (str.includes('Backend error') || str.includes('APP_ERROR')) {
     rec.status = 'Backend error';
   } else if (str.includes('Rotating IP') || str.includes('IP rotation')) {
@@ -212,6 +220,10 @@ function appendLog(profileId, text) {
     rec.status = 'Cloudflare';
   } else if (str.includes('[STOPPED]') || str.includes('Script stopped')) {
     rec.status = 'Stopped';
+    rec.paused = true;   // core is alive in listening mode — Start resumes it
+  } else if (str.includes('[RESUMED]')) {
+    rec.paused = false;
+    rec.status = 'Running';
   } else if ((rec.status || '').startsWith('Consular —')) {
     // Explicit marker label (e.g. 'Consular — OFC: 12/1/2026 10:00 AM') — don't
     // let cosmetic keyword guesses ('Schedule page', 'Consular', 'Submitting')
@@ -453,6 +465,13 @@ async function startProfile(profileId) {
 
   let rec = runningProfiles.get(profileId);
   if (rec && rec.process && !rec.process.killed) {
+    // Paused listener is alive → write the resume flag; the core continues
+    // its loop from where it paused instead of spawning a new process.
+    if (rec.paused) {
+      try { fs.writeFileSync(getStartSignalFile(profileId), String(Date.now())); } catch {}
+      appendLog(profileId, '[UI] Resume signal sent to paused profile.\n');
+      return { ok: true, msg: 'Resume sent' };
+    }
     return { ok: false, msg: 'Already running' };
   }
 
@@ -554,34 +573,14 @@ function stopProfile(profileId) {
   const rec = runningProfiles.get(profileId);
   if (!rec || !rec.process) return { ok: false, msg: 'Not running' };
 
-  appendLog(profileId, '[UI] Stopping automation script (Chrome will stay open)...\n');
+  // Stop = pause + listen: the core stays alive watching the page (no actions)
+  // and resumes on Start. No fallback kill — the process is supposed to live.
+  appendLog(profileId, '[UI] Stopped\n');
+  rec.status = 'Stopped';
+  rec.paused = true;
   try { fs.writeFileSync(getStopSignalFile(profileId), String(Date.now())); } catch {}
 
-  const pid = rec.process.pid;
-  setTimeout(() => {
-    const still = runningProfiles.get(profileId);
-    if (still && still.process && still.process.pid === pid) {
-      appendLog(profileId, '[UI] Forcing stop (fallback)...\n');
-      try {
-        if (process.platform === 'win32') {
-          // Shell-spawned (dev/tsx): the tracked pid is the cmd.exe wrapper —
-          // /T kills the wrapper's whole tree incl. the real node process.
-          // Packaged (direct ivac-core.exe): plain /F suffices and MUST NOT use
-          // /T — Chrome is a child of the core and a tree kill would close it.
-          const tk = still.useShell
-            ? 'taskkill /pid ' + pid + ' /T /F'
-            : 'taskkill /pid ' + pid + ' /F';
-          exec(tk, { windowsHide: true }, (err) => {
-            if (err) appendLog(profileId, '[UI] Force-kill failed: ' + err.message + '\n');
-          });
-        } else {
-          still.process.kill('SIGKILL');
-        }
-      } catch {}
-    }
-  }, 5000);
-
-  return { ok: true, msg: 'Stop signal sent' };
+  return { ok: true, msg: 'Stopped' };
 }
 
 async function connectChrome(profileId) {
@@ -632,8 +631,31 @@ async function connectChrome(profileId) {
   return { ok: false, msg: 'Failed to connect' };
 }
 
+// Hard-kill a profile's core process — used only by stopAllProfiles (launcher
+// quit/close). Plain Stop must NOT reach here: the core stays alive listening.
+function killProfileProcess(rec) {
+  if (!rec || !rec.process || rec.process.killed) return;
+  try {
+    if (process.platform === 'win32') {
+      // Shell-spawned (dev/tsx): tracked pid is the cmd.exe wrapper — /T kills
+      // the tree incl. the real node process. Packaged (direct ivac-core.exe):
+      // plain /F suffices and MUST NOT use /T — Chrome is a core child and a
+      // tree kill would close it too.
+      const tk = rec.useShell
+        ? 'taskkill /pid ' + rec.process.pid + ' /T /F'
+        : 'taskkill /pid ' + rec.process.pid + ' /F';
+      exec(tk, { windowsHide: true }, () => {});
+    } else {
+      rec.process.kill('SIGKILL');
+    }
+  } catch {}
+}
+
 function stopAllProfiles() {
-  for (const [id] of runningProfiles) stopProfile(id);
+  for (const [id, rec] of runningProfiles) {
+    try { fs.writeFileSync(getStopSignalFile(id), String(Date.now())); } catch {}
+    killProfileProcess(rec);
+  }
 }
 
 // ---- HTTP API server ----
@@ -834,6 +856,7 @@ const apiServer = http.createServer(async (req, res) => {
     const enriched = await Promise.all((cfg.profiles || []).map(async (p) => ({
       ...p,
       running: runningProfiles.has(p.id),
+      paused: runningProfiles.get(p.id)?.paused === true,
       status: runningProfiles.get(p.id)?.status || 'Stopped',
       checkpoints: runningProfiles.get(p.id)?.checkpoints || {},
       chromeConnected: await isPortOpen(p.chromeRemoteDebugPort || 9222)

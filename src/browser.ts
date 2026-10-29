@@ -32,15 +32,24 @@ export type BrowserConnection = BrowserLaunch & {
 
 /**
  * Client-side request blocking — the DevTools "Network request blocking" recipe.
- * The schedule page fires a page-views telemetry POST per cycle; fulfilling it
- * locally with an empty 204 keeps the XHR happy while dropping the request from
- * the wire (one less hit feeding the rate limiter). Installed on the context so
- * it covers the automation page and any tabs it opens later.
+ * The schedule page fires GET /api/v1/page-views/schedule/single-family-
+ * schedule-page-views on every load: it BOTH increments the server-side view
+ * counter AND returns {showWarning, canViewPage} — canViewPage:false makes the
+ * page's own JS run $('#page_form').remove() (strips city select + calendar).
+ * Fulfilling locally with canViewPage:true means the request never reaches the
+ * server (counter never grows) and the form is never removed — including on
+ * accounts the server already counts as over-limit, since this response is the
+ * counter's only consumer. Installed on the context so it covers the
+ * automation page and any tabs it opens later.
  */
 async function blockPageViewTelemetry(context: BrowserContext): Promise<void> {
   try {
-    await context.route('**/api/v1/page-views/**', (route) => route.fulfill({ status: 204 }));
-    info('Telemetry block armed: /api/v1/page-views/ → 204');
+    await context.route('**/api/v1/page-views/**', (route) => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: '{"showWarning":false,"canViewPage":true}'
+    }));
+    info('Telemetry block armed: /api/v1/page-views/ → forged canViewPage:true');
   } catch (err) {
     warn('Failed to install page-views route block:', err instanceof Error ? err.message : String(err));
   }

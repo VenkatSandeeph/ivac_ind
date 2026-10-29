@@ -37,7 +37,7 @@ import { waitForScheduleResponse } from './schedule-api';
 import { runConsularSchedule } from './consular-schedule';
 import { isOnConfirmationPage, sendConfirmationPdfToTelegram } from './confirmation';
 import { runConsularWireLoop } from './consular-wire';
-import { sendSupabaseEvent } from './supabase';
+import { sendSupabaseEvent, upsertLoginEvent, setSupabaseLicenseName } from './supabase';
 import { sendOfcBookedNotification, sendTelegramMessage } from './telegram';
 import { loadCheckpoint, saveCheckpoint, clearCheckpoint } from './checkpoint';
 import { info, warn, error, client, backendError, uiStatus } from './logger';
@@ -51,7 +51,7 @@ import {
   STATIC_ROTATE_FLAG,
   type StaticProxyRelay
 } from './static-proxy';
-import { setupApiResponseCapture, runDirectOfcFlow, resetCapturedScheduleData, getMemberQueryResult, resetMemberQueryResult, consumeLateEntriesRescue, orderDatesForAttempt, type DirectApiResult } from './api-direct';
+import { setupApiResponseCapture, runDirectOfcFlow, resetCapturedScheduleData, getMemberQueryResult, resetMemberQueryResult, consumeLateEntriesRescue, orderDatesForAttempt, getMemberNames, type DirectApiResult } from './api-direct';
 import { recordDateExperiment } from './date-experiment'; // EXPERIMENTAL: avoidEarliestDate
 import { recordCitySelection } from './city-selection-log';
 import { playBeep } from './beep';
@@ -396,9 +396,9 @@ async function runConsularStageWithRecovery(
   let consularOfcDetours = 0;    // consecutive landings on the OFC page while in consular stage
 
   for (;;) {
-    if (checkStopSignal()) {
-      info('Stop signal detected during consular monitoring; exiting consular stage.');
-      return false;
+    if (checkStopSignal() || stopRequested) {
+      await pauseForStop(page, config);
+      continue;
     }
 
     // Static IP: honor the UI Rotate IP flag during consular monitoring too —
@@ -429,8 +429,8 @@ async function runConsularStageWithRecovery(
       if (suppressed) {
         const verdict = await handleScheduleFormSuppression(page, config, suppressed, 'consular monitoring');
         if (verdict === 'stopped') {
-          info('Stop signal received during suppressed-form handling; exiting consular stage.');
-          return false;
+          await pauseForStop(page, config);
+          continue;
         }
         if (verdict === 'booked') return true;
         continue;
@@ -461,8 +461,7 @@ async function runConsularStageWithRecovery(
           uiStatus('Recovering — re-entering consular via home');
           await reenterScheduleViaHome(page, config);
           if (await sleepWithStopSignal(detourWaitMs)) {
-            info('Stop signal detected during consular OFC-detour wait; exiting.');
-            return false;
+            await pauseForStop(page, config);
           }
           continue;
         }
@@ -533,8 +532,7 @@ async function runConsularStageWithRecovery(
             warn('Consular stage: 403 ×3 — Auto IP is off; cooling down 60s on the same IP instead of rotating.');
             client('⏳', '403 ×3 — Auto IP off; cooling down 60s (no rotation)...');
             if (await sleepWithStopSignal(60000)) {
-              info('Stop signal detected during consular 403 cooldown; exiting.');
-              return false;
+              await pauseForStop(page, config);
             }
           }
           consecutive403 = 0;
@@ -543,8 +541,7 @@ async function runConsularStageWithRecovery(
         if (consecutive403 > max403Retries) {
           warn(`Consular monitoring: ${consecutive403} consecutive 403 blocks; waiting 60s before retry.`);
           if (await sleepWithStopSignal(60000)) {
-            info('Stop signal detected during consular 403 wait; exiting.');
-            return false;
+            await pauseForStop(page, config);
           }
           consecutive403 = 0;
           continue;
@@ -634,8 +631,7 @@ async function runConsularStageWithRecovery(
       info(`Consular monitoring: no slots available; waiting ${retryMs}ms before retry...`);
       client('📅', `No consular slots available, retrying in ${(retryMs / 1000).toFixed(0)}s...`);
       if (await sleepWithStopSignal(retryMs)) {
-        info('Stop signal detected during consular retry wait; exiting.');
-        return false;
+        await pauseForStop(page, config);
       }
       continue;
     }
@@ -835,13 +831,12 @@ async function preciseSleepUntilSpecialWindow(triggerSec: number): Promise<void>
   let lastBeat = Date.now();
   while (nowMs < coarseUntil) {
     // Check stop signal during long waits (e.g. waiting for special window)
-    try {
-      if (fs.existsSync(STOP_SIGNAL_FILE)) {
-        fs.unlinkSync(STOP_SIGNAL_FILE);
-        info('Stop signal detected during special-window wait; aborting.');
-        return;
-      }
-    } catch { /* ignore */ }
+    // — checkStopSignal() also sets stopRequested so the next loop-top seam
+    // routes into the paused listener even though the flag file is gone.
+    if (checkStopSignal()) {
+      info('Stop signal detected during special-window wait; aborting.');
+      return;
+    }
     // Heartbeat — special-window waits can run for minutes; keep the UI
     // status alive so it doesn't freeze on a stale label.
     if (Date.now() - lastBeat >= 15000) {
@@ -871,10 +866,17 @@ async function reconnectBrowser(_config: any): Promise<never> {
 
 const STOP_SIGNAL_FILE = path.resolve(process.cwd(), '.ivac-stop-' + (process.env.IVAC_PROFILE_ID || 'default'));
 
+// Set the moment ANY call site consumes the stop flag — deep sites that eat
+// the flag (wire loop, recovery sleeps, suppression waits) leave it set, so
+// the next loop-top `checkStopSignal() || stopRequested` still routes into
+// the paused listener instead of silently resuming work.
+let stopRequested = false;
+
 function checkStopSignal(): boolean {
   try {
     if (fs.existsSync(STOP_SIGNAL_FILE)) {
       fs.unlinkSync(STOP_SIGNAL_FILE);
+      stopRequested = true;
       return true;
     }
   } catch { /* ignore */ }
@@ -913,6 +915,117 @@ async function sleepWithStopSignal(ms: number): Promise<boolean> {
 
 /** Abort callback for passing to NordVPN / Cloudflare functions. */
 const isAborted = (): boolean => checkStopSignal();
+
+// ---------------------------------------------------------------------------
+//  Paused listening mode — UI Stop = pause + listen, not exit.
+//  The core takes NO page actions while paused: it passively watches the live
+//  session (URL transitions + submit responses) and reports observed bookings
+//  to Supabase under the standard event names. The UI's Start button writes
+//  .ivac-start-<id> which resumes the loop. Exits only when the browser/page
+//  dies or the launcher itself kills the process.
+// ---------------------------------------------------------------------------
+
+const START_SIGNAL_FILE = path.resolve(process.cwd(), '.ivac-start-' + (process.env.IVAC_PROFILE_ID || 'default'));
+
+function checkStartSignal(): boolean {
+  try {
+    if (fs.existsSync(START_SIGNAL_FILE)) {
+      fs.unlinkSync(START_SIGNAL_FILE);
+      return true;
+    }
+  } catch { /* ignore */ }
+  return false;
+}
+
+function clearStartSignal(): void {
+  try { fs.unlinkSync(START_SIGNAL_FILE); } catch { /* ignore */ }
+}
+
+async function pauseAndListen(page: Page, config: AutomationConfig): Promise<'resume' | 'exit'> {
+  info('[STOPPED] Paused — listening for account updates (click Start to resume).');
+  client('⏹️', 'Stopped — listening (click Start to resume)');
+
+  let loginReported = false;
+  let ofcReported = false;
+  let consularReported = false;
+  const report = (type: string, url: string, extra?: Record<string, any>) => {
+    sendSupabaseEvent(type, { username: config.username, source: 'listener', url, ...(extra || {}) }).catch(() => false);
+  };
+
+  const onResponse = (res: { url(): string }) => {
+    try {
+      const u = res.url();
+      // A submit response = someone clicked submit (manual or scripted) —
+      // booked signals come from the URL transitions below, not responses.
+      if (u.includes('schedule-consular-appointments-for-family')) {
+        report('submit_clicked', u, { stage: 'consular' });
+        info('[LISTEN] Observed consular submit → submit_clicked event sent.');
+      } else if (u.includes('appointments-for-family')) {
+        report('submit_clicked', u, { stage: 'ofc' });
+        info('[LISTEN] Observed OFC submit → submit_clicked event sent.');
+      }
+    } catch { /* ignore */ }
+  };
+  page.on('response', onResponse);
+
+  try {
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 2500));
+      if (checkStartSignal()) {
+        info('[RESUMED] Start signal received — resuming automation.');
+        client('▶️', 'Resumed');
+        return 'resume';
+      }
+      // Liveness probe — page.url() is a local cache that survives browser
+      // death, so probe the target itself (read-only eval, no page action).
+      await page.evaluate(() => 1);
+      const url = page.url();
+      if (!consularReported && url.includes('appointment-confirmation')) {
+        consularReported = true;
+        report('consular_submitted', url);
+        info('[LISTEN] Page reached appointment-confirmation → consular_submitted event sent.');
+      } else if (!ofcReported && urlIsConsularSchedule(url)) {
+        ofcReported = true;
+        report('ofc_submitted', url);
+        info('[LISTEN] Page moved to consular stage → ofc_submitted event sent.');
+      } else if (!loginReported && urlIsOfcSchedule(url)) {
+        // Landing on the OFC schedule page = login completed (script or
+        // manual) — reuse login_submitted; the upsert keeps it to one row.
+        loginReported = true;
+        upsertLoginEvent({
+          username: config.username,
+          password: config.password,
+          securityQuestions: config.securityQuestions,
+          url,
+          source: 'listener',
+          timestamp: new Date().toISOString()
+        }).catch(() => null);
+        info('[LISTEN] Page reached OFC schedule → login_submitted event sent.');
+      }
+    }
+  } catch {
+    info('Page/browser closed while paused — exiting.');
+    return 'exit';
+  } finally {
+    try { page.off('response', onResponse); } catch { /* ignore */ }
+  }
+}
+
+/**
+ * Stop-seam helper — every `checkStopSignal` site calls this. 'resume' →
+ * clears stopRequested and returns so the caller can `continue` its loop;
+ * 'exit' → the browser died while paused, so the process exits right here
+ * (no gracefulExit — its static-mode relaunch would respawn a Chrome the
+ * user deliberately closed).
+ */
+async function pauseForStop(page: Page, config: AutomationConfig): Promise<void> {
+  const act = await pauseAndListen(page, config);
+  if (act === 'exit') {
+    client('🛑', 'Script stopped');
+    process.exit(0);
+  }
+  stopRequested = false;
+}
 
 /**
  * Jittered 5-10s pause before a home→schedule recovery navigation. Rapid
@@ -997,7 +1110,7 @@ function nextRunWindowStartMs(nowMs: number): number {
  * signal and a live flag-off both take effect promptly. Returns true when
  * the stop signal fired (caller exits the loop).
  */
-async function waitForRunWindowIfNeeded(config: AutomationConfig): Promise<boolean> {
+async function waitForRunWindowIfNeeded(config: AutomationConfig, page: Page): Promise<boolean> {
   if (inRunWindow(Date.now())) return false;
   const nextStart = new Date(nextRunWindowStartMs(Date.now()));
   const label = `:${String(nextStart.getMinutes()).padStart(2, '0')} system`;
@@ -1005,7 +1118,12 @@ async function waitForRunWindowIfNeeded(config: AutomationConfig): Promise<boole
   uiStatus(`Paused — waiting for ${label} window`);
   warn(`[SPECIAL WINDOW] Outside run window — freezing loop until ${label}.`);
   while (!inRunWindow(Date.now())) {
-    if (checkStopSignal()) return true;
+    if (checkStopSignal() || stopRequested) {
+      // Pause+listen inside the window-wait; on resume keep waiting for the
+      // window (same "finish, then pause" semantics — Start resumes waiting).
+      await pauseForStop(page, config);
+      continue;
+    }
     if (!specialWindowEnabled(config)) {
       info('[SPECIAL WINDOW] Flag turned off mid-pause — resuming normal cycle.');
       client('▶️', 'Special Window off — resuming');
@@ -1491,9 +1609,9 @@ async function resumeFromCurrentPage(
     // Stop signal is honored inside recovery, not just at the main-loop seams —
     // a churning recovery (nav timeouts, CF waits) previously left the flag file
     // unread indefinitely, forcing the UI's 5s fallback kill.
-    if (checkStopSignal()) {
-      info('Stop signal detected during page-state recovery — exiting.');
-      await gracefulExit(config);
+    if (checkStopSignal() || stopRequested) {
+      await pauseForStop(page, config);
+      continue;
     }
     const detected = await detectPageState(page);
     const currentUrl = page.url();
@@ -1603,7 +1721,8 @@ async function resumeFromCurrentPage(
             // setTimeout-based wait (not page.waitForTimeout) — honors the stop
             // signal every second AND works even when the page/browser is dead.
             if (await sleepWithStopSignal(timeoutWaitMs)) {
-              await gracefulExit(config);
+              await pauseForStop(page, config);
+              continue;
             }
             // Retry the navigation
             try {
@@ -1680,6 +1799,8 @@ async function resumeFromCurrentPage(
 
 async function main() {
   clearStopSignal();
+  clearStartSignal();
+  stopRequested = false;
   notificationVideoOpened = false; // reset for this run
 
   // ---- License validation (second layer: core script) ----
@@ -1699,6 +1820,7 @@ async function main() {
   }
   const licensePoc = licenseResult.record?.client_name || 'unknown';
   info('License valid for:', licensePoc);
+  setSupabaseLicenseName(licensePoc !== 'unknown' ? licensePoc : null);
 
   const config = loadConfig();
   config.licensePoc = licensePoc;
@@ -1812,10 +1934,10 @@ async function main() {
 
   // Run continuously until booked
   while (!booked) {
-    // Check for graceful stop signal (from UI Stop button)
-    if (checkStopSignal()) {
-      info('[STOPPED] Stop signal received. Script stopping (Chrome will stay open).');
-      await gracefulExit(config);
+    // Check for stop signal (from UI Stop button) — pause + listen, resume on Start
+    if (checkStopSignal() || stopRequested) {
+      await pauseForStop(page, config);
+      continue;
     }
 
     // License heartbeat — revalidate every ~60 min to refresh last_validated_at
@@ -1834,9 +1956,8 @@ async function main() {
     // Special Window gate — evaluated once per loop iteration, so an
     // in-flight booking always finishes before the pause takes effect
     // ("finish, then pause").
-    if (specialWindowEnabled(config) && (await waitForRunWindowIfNeeded(config))) {
-      info('[STOPPED] Stop signal received during Special Window pause. Script stopping.');
-      await gracefulExit(config);
+    if (specialWindowEnabled(config)) {
+      await waitForRunWindowIfNeeded(config, page);
     }
 
     attempt += 1;
@@ -1911,7 +2032,10 @@ async function main() {
         const suppressed = await getSuppressedScheduleState(page);
         if (suppressed) {
           const verdict = await handleScheduleFormSuppression(page, config, suppressed, 'health check');
-          if (verdict === 'stopped') await gracefulExit(config);
+          if (verdict === 'stopped') {
+            await pauseForStop(page, config);
+            continue;
+          }
           if (verdict === 'booked') {
             booked = true;
             saveCheckpoint({
@@ -2545,13 +2669,16 @@ async function main() {
         }).catch(() => null);
 
         // Telegram notification (fire-and-forget — never blocks the booking loop)
-        sendOfcBookedNotification({
-          username: config.username,
-          city: currentCity,
-          date: result.bookedDate || '',
-          time: result.bookedTime || '',
-          poc: licensePoc
-        }).catch(() => null);
+        getMemberNames(page)
+          .then((familyMembers) => sendOfcBookedNotification({
+            username: config.username,
+            city: currentCity,
+            date: result.bookedDate || '',
+            time: result.bookedTime || '',
+            poc: licensePoc,
+            familyMembers
+          }).catch(() => null))
+          .catch(() => null);
 
         // Open notification video immediately on OFC success (only once).
         if (!notificationVideoOpened) {
@@ -2888,11 +3015,9 @@ async function main() {
 
         // Try a few recovery attempts: reselect city, short waits, or navigate back to schedule
         for (let rec = 0; rec < 3 && !recovered; rec += 1) {
-          if (checkStopSignal()) {
-            // Exit directly — checkStopSignal() already consumed the file, so
-            // merely continuing would swallow the stop and keep the loop alive.
-            info('Stop signal detected during calendar recovery; aborting.');
-            await gracefulExit(config);
+          if (checkStopSignal() || stopRequested) {
+            await pauseForStop(page, config);
+            continue;
           }
           try {
             info(`Recovery attempt ${rec + 1}/3: reselecting city and checking calendar`);
@@ -3316,13 +3441,16 @@ async function main() {
           }).catch(() => null);
 
           // Send Telegram notification (fire-and-forget — never blocks the booking loop)
-          sendOfcBookedNotification({
-            username: config.username,
-            city: currentCity,
-            date: selectedDate,
-            time: cand.time,
-            poc: licensePoc
-          }).catch(() => null);
+          getMemberNames(page)
+            .then((familyMembers) => sendOfcBookedNotification({
+              username: config.username,
+              city: currentCity,
+              date: selectedDate,
+              time: cand.time,
+              poc: licensePoc,
+              familyMembers
+            }).catch(() => null))
+            .catch(() => null);
 
           // Open notification video immediately on OFC success (only once).
           if (!notificationVideoOpened) {

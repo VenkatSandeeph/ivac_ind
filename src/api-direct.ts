@@ -98,6 +98,9 @@ export type DirectApiResult = {
 // =============================================================================
 
 let capturedApplications: string[] | null = null;
+// Display names from the same query-family-members response — kept ONLY for
+// the booked Telegram message; never used for seat counting or submission.
+let capturedMemberNames: string[] = [];
 let capturedScheduleDays: ScheduleDay[] | null = null;
 let capturedScheduleToken: string | null = null;
 
@@ -149,6 +152,53 @@ export function resetMemberQueryResult(): void {
   memberQueryStatus = null;
   memberQueryAt = 0;
   memberQueryError = null;
+}
+
+/**
+ * Best-effort display name for a query-family-members member object — the
+ * wire shape isn't documented, so try the likely fields in order.
+ */
+function extractMemberName(m: any): string {
+  if (!m || typeof m !== 'object') return '';
+  const direct = m.FullName || m.ApplicantName || m.Name || m.DisplayName;
+  if (direct) return String(direct).trim();
+  const composed = [m.FirstName, m.MiddleName, m.LastName]
+    .filter(Boolean).map((p: any) => String(p).trim()).filter(Boolean).join(' ');
+  return composed;
+}
+
+/** Names from the last query-family-members response (empty when unknown). */
+export function getCapturedMemberNames(): string[] {
+  return capturedMemberNames;
+}
+
+/**
+ * DOM fallback for member names — reads the visible labels of the
+ * #gm_select group-member checkboxes on the live schedule page. Used when
+ * the wire capture is empty (stale/missed response). Read-only eval; never
+ * throws — returns [] on any failure.
+ */
+export async function scrapeMemberNames(page: Page): Promise<string[]> {
+  try {
+    const names = await page.evaluate(() => {
+      return Array.from(document.querySelectorAll('#gm_select li'))
+        .map((li) => {
+          const label = li.querySelector('label');
+          const text = (label ? label.textContent : li.textContent) || '';
+          return text.replace(/\s+/g, ' ').trim();
+        })
+        .filter((t) => t.length > 0);
+    });
+    return Array.isArray(names) ? names : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Captured names → DOM scrape → [] — the notification never fails. */
+export async function getMemberNames(page: Page): Promise<string[]> {
+  if (capturedMemberNames.length > 0) return capturedMemberNames;
+  return scrapeMemberNames(page);
 }
 
 // =============================================================================
@@ -290,6 +340,7 @@ export function setupApiResponseCapture(page: Page): void {
         memberQueryAt = Date.now();
         if (!response.ok()) {
           capturedApplications = []; // stale IDs must never be replayed
+          capturedMemberNames = [];
           memberQueryError = `http_${response.status()}`;
           backendError('query-family-members', memberQueryStatus, memberQueryError,
             'group members will not load; schedule calls will fail (SGA14)');
@@ -315,6 +366,12 @@ export function setupApiResponseCapture(page: Page): void {
         const data = await response.json().catch(() => null);
         if (data && Array.isArray(data.Members)) {
           capturedApplications = data.Members.map((m: any) => String(m.ApplicationID || '')).filter(Boolean);
+          capturedMemberNames = data.Members.map(extractMemberName).filter((n: string) => n.length > 0);
+          if (data.Members.length > 0 && capturedMemberNames.length === 0) {
+            // Field-name miss — log the raw shape once so the real key can be
+            // pinned without guessing again.
+            info('[FAST FLOW] Member names not extracted; raw member keys: ' + Object.keys(data.Members[0] || {}).join(','));
+          }
           info(`[FAST FLOW] Captured ${capturedApplications?.length || 0} application(s) from queryFamilyMembers`);
         } else if (data && data.HasError) {
           memberQueryError = String(data.Errors?.m_StringValue || 'has_error');

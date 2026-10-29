@@ -12,6 +12,7 @@ export type OfcBookedNotification = {
   date: string;
   time: string;
   poc?: string;
+  familyMembers?: string[];
 };
 
 /**
@@ -139,10 +140,16 @@ export async function sendTelegramDocument(document: Buffer, filename: string, c
 export async function sendOfcBookedNotification(data: OfcBookedNotification): Promise<boolean> {
   const timestamp = istTimestamp();
 
+  const members = (data.familyMembers || []).filter((n) => n && n.trim().length > 0);
+  const memberLines = members.length > 0
+    ? ['<b>👥 Family Members:</b>', ...members.map((n, i) => `${i + 1}. ${escapeHtml(n)}`)]
+    : [];
+
   const message = [
     '<b>✅ OFC Appointment Booked</b>',
     '',
     `<b>👤 Client User:</b> ${escapeHtml(data.username)}`,
+    ...memberLines,
     `<b>🏙 City:</b> ${escapeHtml(data.city)}`,
     `<b>📅 Date:</b> ${escapeHtml(data.date)}`,
     `<b>⏰ Time:</b> ${escapeHtml(data.time)}`,
