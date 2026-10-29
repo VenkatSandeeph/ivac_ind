@@ -287,6 +287,10 @@ async function loadProfiles() {
 // not re-render the list (it would kill the in-motion drag).
 let dragSrcId = null;
 let isDragging = false;
+// Set on mousedown (capture) — dragstart's e.target is the DRAGGABLE row, not
+// the pressed element, so the grip check must be recorded before the drag
+// begins. Cleared on mouseup/dragend.
+let gripArmed = false;
 
 function renderProfiles() {
   if (isDragging) return;
@@ -365,10 +369,16 @@ function wireProfileReorder() {
   const list = document.getElementById('profileList');
   if (!list) return;
 
+  list.addEventListener('mousedown', (e) => {
+    gripArmed = !!e.target.closest('.drag-grip');
+  }, true);
+
+  list.addEventListener('mouseup', () => { gripArmed = false; }, true);
+
   list.addEventListener('dragstart', (e) => {
     const row = e.target.closest('.profile-row');
     // Only the grip initiates a reorder drag — card clicks/buttons unchanged.
-    if (!row || !e.target.closest('.drag-grip')) { e.preventDefault(); return; }
+    if (!row || !gripArmed) { e.preventDefault(); return; }
     dragSrcId = row.dataset.id;
     isDragging = true;
     row.classList.add('dragging');
@@ -410,6 +420,7 @@ function wireProfileReorder() {
   list.addEventListener('dragend', () => {
     isDragging = false;
     dragSrcId = null;
+    gripArmed = false;
     clearDropMarks(list);
     renderProfiles(); // flush any poll renders deferred while dragging
   });
