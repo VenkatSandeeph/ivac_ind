@@ -942,6 +942,11 @@ function clearStartSignal(): void {
 }
 
 async function pauseAndListen(page: Page, config: AutomationConfig): Promise<'resume' | 'exit'> {
+  // Consume any start flag written BEFORE this pause began (e.g. UI clicks
+  // queued while the core was still working) — only a signal written during
+  // the pause itself may resume it, otherwise a stale file would instantly
+  // un-pause a Stop the user just requested.
+  clearStartSignal();
   info('[STOPPED] Paused — listening for account updates (click Start to resume).');
   client('⏹️', 'Stopped — listening (click Start to resume)');
 

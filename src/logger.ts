@@ -32,9 +32,10 @@ function isClientHidden(text: string): boolean {
 
 // Machine markers the UI parses out of the core's stdout (ui/main.js):
 // [UI_STATUS] → profile status label, [BROWSER_CLOSED] → banner,
-// [STOPPED] → status. In client mode these MUST keep printing even though
-// all other info/warn lines are suppressed — dropping them breaks the UI.
-const UI_MARKER_RE = /\[(UI_STATUS|BROWSER_CLOSED|STOPPED)\]/;
+// [STOPPED]/[RESUMED] → paused flag. In client mode these MUST keep
+// printing even though all other info/warn lines are suppressed —
+// dropping them breaks the UI.
+const UI_MARKER_RE = /\[(UI_STATUS|BROWSER_CLOSED|STOPPED|RESUMED)\]/;
 function isUiMarker(text: string): boolean {
   return UI_MARKER_RE.test(text);
 }
