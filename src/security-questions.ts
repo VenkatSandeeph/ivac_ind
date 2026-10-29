@@ -4,6 +4,11 @@ import { info, warn } from './logger';
 
 function cleanText(text: string) {
   return text
+    // The site mixes typographic quotes into question text (observed: U+2019
+    // in "didn’t") while stored configs use ASCII — normalize both sides so
+    // matching is punctuation-style agnostic.
+    .replace(/[\u2018\u2019\u201A\u201B\u2032]/g, "'")
+    .replace(/[\u201C\u201D\u201E\u2033]/g, '"')
     .replace(/\s+/g, ' ')
     .trim()
     .toLowerCase();
