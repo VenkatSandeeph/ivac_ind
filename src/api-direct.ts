@@ -735,6 +735,30 @@ function filterScheduleDays(days: ScheduleDay[], config: AutomationConfig): Sche
 }
 
 /**
+ * Drops dates listed in appointment.excludeDates (phantom/glitch slots the
+ * user never wants attempted). Returns the SAME array reference when nothing
+ * is excluded — downstream reorder-detection (`!==`) stays accurate. Each
+ * dropped date gets one client log line. Never throws.
+ */
+export function filterExcludedDates<T>(dates: T[], getIso: (d: T) => string, config: AutomationConfig): T[] {
+  const excl = config.appointment?.excludeDates;
+  if (!excl || excl.length === 0 || dates.length === 0) return dates;
+  const set = new Set(excl);
+  let dropped = false;
+  const kept = dates.filter((d) => {
+    const iso = getIso(d);
+    if (iso && set.has(iso)) {
+      dropped = true;
+      client('📅', `${iso} excluded`);
+      info(`[EXCLUDE] ${iso} skipped — listed in profile excludeDates`);
+      return false;
+    }
+    return true;
+  });
+  return dropped ? kept : dates;
+}
+
+/**
  * Sorts schedule entries by preferred time, then by availability.
  * preferLeast=false → most-available first (default); true → least-available first.
  */
@@ -1757,7 +1781,11 @@ export async function runDirectOfcFlow(page: Page, config: AutomationConfig): Pr
   // EXPERIMENTAL: avoidEarliestDate — reorder [2nd, 1st, ...] when the 2nd
   // date is within the working-day window. No-op when disabled/one date.
   // datesReordered feeds outcome logging (promoted = tried-first 2nd date).
-  const filteredDates = filterScheduleDays(capturedScheduleDays, config);
+  const filteredDates = filterExcludedDates(
+    filterScheduleDays(capturedScheduleDays, config),
+    d => d.Date.substring(0, 10),
+    config
+  );
   const matchingDates = orderDatesForAttempt(
     filteredDates,
     d => d.Date.substring(0, 10),

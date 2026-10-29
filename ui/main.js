@@ -153,7 +153,8 @@ function migrateLegacyConfig(raw) {
       city: '',
       startDate: '',
       endDate: '',
-      preferredTime: null
+      preferredTime: null,
+      excludeDates: []
     },
     consular: raw.consular || {
       city: [],

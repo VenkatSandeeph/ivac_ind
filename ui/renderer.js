@@ -527,6 +527,7 @@ function openModal(profile) {
     });
     document.getElementById('pStartDate').value = a.startDate || '';
     document.getElementById('pEndDate').value = a.endDate || '';
+    document.getElementById('pExcludeDates').value = Array.isArray(a.excludeDates) ? a.excludeDates.join(', ') : (a.excludeDates || '');
     document.getElementById('pPreferredTime').value = a.preferredTime || '';
     document.getElementById('pCityRetrySeconds').value = profile.cityRetrySeconds ?? 30;
     const cons = profile.consular || {};
@@ -552,6 +553,7 @@ function openModal(profile) {
     document.querySelectorAll('.consular-city-checks input').forEach((cb) => cb.checked = false);
     document.getElementById('pStartDate').value = '';
     document.getElementById('pEndDate').value = '';
+    document.getElementById('pExcludeDates').value = '';
     document.getElementById('pPreferredTime').value = '';
     document.getElementById('pCityRetrySeconds').value = 30;
     document.getElementById('pConsularStartDate').value = '';
@@ -617,6 +619,38 @@ function collectConsularCities() {
   return cities;
 }
 
+// Exclude-dates parsing — tolerant of DD-MM-YYYY, DD/MM/YYYY and YYYY-MM-DD,
+// comma/space/newline separated; everything normalizes to ISO YYYY-MM-DD.
+// Mirrors the loader-side parser in src/config.ts (keep the two in sync).
+function normalizeExcludeDateToken(tok) {
+  const t = String(tok || '').trim();
+  if (!t) return null;
+  let m = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(t);
+  let y, mo, d;
+  if (m) { y = +m[1]; mo = +m[2]; d = +m[3]; }
+  else {
+    m = /^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/.exec(t);
+    if (!m) return null;
+    d = +m[1]; mo = +m[2]; y = +m[3];
+  }
+  const dt = new Date(y, mo - 1, d);
+  if (dt.getFullYear() !== y || dt.getMonth() !== mo - 1 || dt.getDate() !== d) return null;
+  return `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+}
+
+function collectExcludeDates() {
+  const raw = document.getElementById('pExcludeDates').value;
+  const bad = [];
+  const out = [];
+  raw.split(/[\s,;]+/).forEach((tok) => {
+    if (!tok.trim()) return;
+    const iso = normalizeExcludeDateToken(tok);
+    if (iso) { if (!out.includes(iso)) out.push(iso); }
+    else bad.push(tok.trim());
+  });
+  return { dates: out, invalid: bad };
+}
+
 function buildProfileFromForm(onDone) {
   let id = document.getElementById('pId').value;
   let instanceIndex = parseInt(document.getElementById('pInstanceIndex').value, 10) || 0;
@@ -646,6 +680,12 @@ function buildProfileFromForm(onDone) {
 
   if (new Date(startDate) > new Date(endDate)) {
     showAlert('Start date must be earlier than or equal to end date.', onDone);
+    return;
+  }
+
+  const excludeDates = collectExcludeDates();
+  if (excludeDates.invalid.length > 0) {
+    showAlert('Exclude Dates has entries I cannot read: ' + excludeDates.invalid.join(', ') + '. Use dates like 2-11-2026.', onDone);
     return;
   }
 
@@ -693,17 +733,17 @@ function buildProfileFromForm(onDone) {
       'Debug port ' + debugPort + ' is already used by ' + otherProfile.username + '. Continue anyway?',
       () => {
         // User confirmed — proceed
-        finishBuildProfile(id, instanceIndex, username, password, securityQuestions, cities, startDate, endDate, debugPort, cityRetrySeconds, consular, visaType, onDone);
+        finishBuildProfile(id, instanceIndex, username, password, securityQuestions, cities, startDate, endDate, debugPort, cityRetrySeconds, consular, visaType, excludeDates.dates, onDone);
       },
       onDone
     );
     return;
   }
 
-  finishBuildProfile(id, instanceIndex, username, password, securityQuestions, cities, startDate, endDate, debugPort, cityRetrySeconds, consular, visaType, onDone);
+  finishBuildProfile(id, instanceIndex, username, password, securityQuestions, cities, startDate, endDate, debugPort, cityRetrySeconds, consular, visaType, excludeDates.dates, onDone);
 }
 
-function finishBuildProfile(id, instanceIndex, username, password, securityQuestions, cities, startDate, endDate, debugPort, cityRetrySeconds, consular, visaType, onDone) {
+function finishBuildProfile(id, instanceIndex, username, password, securityQuestions, cities, startDate, endDate, debugPort, cityRetrySeconds, consular, visaType, excludeDates, onDone) {
   const profile = {
     id: id || undefined,
     instanceIndex,
@@ -715,7 +755,8 @@ function finishBuildProfile(id, instanceIndex, username, password, securityQuest
       city: cities,
       startDate,
       endDate,
-      preferredTime: document.getElementById('pPreferredTime').value.trim() || null
+      preferredTime: document.getElementById('pPreferredTime').value.trim() || null,
+      excludeDates
     },
     consular,
     chromeRemoteDebugPort: debugPort,

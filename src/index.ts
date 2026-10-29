@@ -51,7 +51,7 @@ import {
   STATIC_ROTATE_FLAG,
   type StaticProxyRelay
 } from './static-proxy';
-import { setupApiResponseCapture, runDirectOfcFlow, resetCapturedScheduleData, getMemberQueryResult, resetMemberQueryResult, consumeLateEntriesRescue, orderDatesForAttempt, getMemberNames, type DirectApiResult } from './api-direct';
+import { setupApiResponseCapture, runDirectOfcFlow, resetCapturedScheduleData, getMemberQueryResult, resetMemberQueryResult, consumeLateEntriesRescue, orderDatesForAttempt, filterExcludedDates, getMemberNames, type DirectApiResult } from './api-direct';
 import { recordDateExperiment } from './date-experiment'; // EXPERIMENTAL: avoidEarliestDate
 import { recordCitySelection } from './city-selection-log';
 import { playBeep } from './beep';
@@ -3134,9 +3134,10 @@ async function main() {
         );
         // EXPERIMENTAL: avoidEarliestDate — same 2nd-first reorder as the
         // fast flow so DOM fallback doesn't silently switch strategy.
-        candidateDates = orderDatesForAttempt(inRange, c => c.date, config.avoidEarliestDate,
+        const usableDates = filterExcludedDates(inRange, c => c.date, config);
+        candidateDates = orderDatesForAttempt(usableDates, c => c.date, config.avoidEarliestDate,
           { path: 'dom', profile: config.username, city: currentCity, runId, attempt });
-        domDatesReordered = candidateDates !== inRange;
+        domDatesReordered = candidateDates !== usableDates;
 
         // Log all available dates to client (even if not in range)
         const allDates = allAvailable.map(d => d.date);
@@ -3200,9 +3201,10 @@ async function main() {
                 []
               );
               // EXPERIMENTAL: avoidEarliestDate — same reorder as fast flow.
-              candidateDates = orderDatesForAttempt(inRange, c => c.date, config.avoidEarliestDate,
+              const tryUsableDates = filterExcludedDates(inRange, c => c.date, config);
+              candidateDates = orderDatesForAttempt(tryUsableDates, c => c.date, config.avoidEarliestDate,
                 { path: 'dom', profile: config.username, city: tryCity, runId, attempt });
-              domDatesReordered = candidateDates !== inRange;
+              domDatesReordered = candidateDates !== tryUsableDates;
               // Log all available dates to client (even if not in range)
               const tryAllDates = allAvailable.map(d => d.date);
               const tryInRangeDates = inRange.map(d => d.date);

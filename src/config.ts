@@ -31,6 +31,9 @@ export type AppointmentConfig = {
   startDate: string;
   endDate: string;
   preferredTime?: string | null;
+  // Dates the script must never attempt (phantom/glitch slots) — ISO
+  // YYYY-MM-DD strings, normalized at load by normalizeExcludeDates.
+  excludeDates?: string[];
 };
 
 // Consular stage config — independent of the OFC appointment block.
@@ -175,6 +178,38 @@ function parseNumber(value: unknown, fallback: number) {
     return Number.isFinite(parsed) ? parsed : fallback;
   }
   return fallback;
+}
+
+// Exclude-dates parsing — tolerant of DD-MM-YYYY, DD/MM/YYYY and YYYY-MM-DD,
+// comma/space/semicolon separated or an array; everything normalizes to ISO
+// YYYY-MM-DD so the booking paths only do Set lookups. Mirrors the parser in
+// ui/renderer.js (keep the two in sync). Unparseable entries are warned+dropped
+// rather than silently booked.
+function normalizeExcludeDates(value: unknown): string[] {
+  const raw: string[] = Array.isArray(value)
+    ? value.map((v) => String(v))
+    : (typeof value === 'string' ? value.split(/[\s,;]+/) : []);
+  const out: string[] = [];
+  for (const tok of raw) {
+    const t = tok.trim();
+    if (!t) continue;
+    let m = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(t);
+    let y = 0, mo = 0, d = 0;
+    if (m) { y = +m[1]; mo = +m[2]; d = +m[3]; }
+    else {
+      m = /^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/.exec(t);
+      if (!m) { console.warn(`[CONFIG] excludeDates: ignoring unparseable entry "${t}"`); continue; }
+      d = +m[1]; mo = +m[2]; y = +m[3];
+    }
+    const dt = new Date(y, mo - 1, d);
+    if (dt.getFullYear() !== y || dt.getMonth() !== mo - 1 || dt.getDate() !== d) {
+      console.warn(`[CONFIG] excludeDates: ignoring invalid date "${t}"`);
+      continue;
+    }
+    const iso = `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    if (!out.includes(iso)) out.push(iso);
+  }
+  return out;
 }
 
 function parseMonth(value: unknown): string | number {
@@ -346,7 +381,8 @@ function mergeWithDefaults(settings: Partial<SettingsConfig>, profile: ProfileCo
     startDate,
     endDate,
     preferredTime:
-      profile.appointment?.preferredTime ?? env.APPOINTMENT_PREFERRED_TIME ?? null
+      profile.appointment?.preferredTime ?? env.APPOINTMENT_PREFERRED_TIME ?? null,
+    excludeDates: normalizeExcludeDates(profile.appointment?.excludeDates ?? env.APPOINTMENT_EXCLUDE_DATES)
   };
 
   // Consular stage. Empty consular.city falls back to the OFC cities with the

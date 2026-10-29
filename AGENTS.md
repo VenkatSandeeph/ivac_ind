@@ -67,6 +67,10 @@ Theory: bots concentrate on the earliest available date, so the 2nd-earliest see
 
 **Experiment logs** (`src/date-experiment.ts` → `logs/date-experiment.jsonl`, fire-and-forget, serialized write queue): `decision` events record every ordering choice — `dates`, `gapWorkingDays`, `enabled`, `wouldReorder` (baseline: fires even when the toggle is OFF, so you can see how often the rule *would* have applied), `reordered`, `order`. `outcome` events per attempted date: `pos` (position in attempt order), `promoted` (tried-first 2nd date), `result` (`booked`/`booked_retry`/`slot_gone`/`throttled`/`no_entries`/`no_eligible`/`submit_error`/`error`/`hard_error`). Join on `runId`+`attempt` (dom) or `postId`+timestamp (fast). Analysis: `findstr "promoted\":true" logs\date-experiment.jsonl` → compare booked-rate of promoted vs non-promoted attempts.
 
+### Exclude Dates ("Exclude Dates" profile field — phantom-slot bypass)
+
+The site sometimes serves glitch inventory: a date renders green, entries load, but every submit bounces ("processing too many requests") and the date keeps reappearing — burning whole drop cycles. Profile `appointment.excludeDates` (ISO `YYYY-MM-DD[]`, UI accepts `DD-MM-YYYY`/`DD/MM/YYYY` comma/space separated, normalized by `normalizeExcludeDates` in `src/config.ts`) is filtered out by `filterExcludedDates` in `src/api-direct.ts` — applied to `filteredDates` before `orderDatesForAttempt` (fast flow + wire replay inherit it via `matchingDates`) and to `inRange` at both DOM `candidateDates` call sites. Each dropped date logs `📅 <iso> excluded` to the client; all-dates-excluded falls into the existing "no dates in range" path. **OFC-only** — consular sweeps are unaffected. Empty list (default) returns the same array reference — zero behavioral change, zero cost. Returns same-ref when nothing dropped so `domDatesReordered`/`datesReordered` `!==` comparisons stay accurate.
+
 ### Per-profile City Selection Log
 
 `src/city-selection-log.ts` appends one line per OFC city selection to `logs/ofc-city-selections-<profile>.txt` (append-only, survives restarts):
