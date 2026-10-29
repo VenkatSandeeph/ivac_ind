@@ -941,6 +941,28 @@ const apiServer = http.createServer(async (req, res) => {
       return jsonResponse(res, { ok: true });
     }
 
+    if (body.action === 'reorder') {
+      // Display order = array order. Re-sort cfg.profiles by the id list the
+      // UI sends; any id not in the list keeps its relative position at the
+      // tail so a stale/partial order can't silently drop a profile.
+      const order = Array.isArray(body.order) ? body.order : [];
+      const byId = new Map(cfg.profiles.map((p) => [p.id, p]));
+      const seen = new Set();
+      const reordered = [];
+      for (const id of order) {
+        if (byId.has(id) && !seen.has(id)) {
+          reordered.push(byId.get(id));
+          seen.add(id);
+        }
+      }
+      for (const p of cfg.profiles) {
+        if (!seen.has(p.id)) reordered.push(p);
+      }
+      cfg.profiles = reordered;
+      writeConfig(cfg);
+      return jsonResponse(res, { ok: true });
+    }
+
     return jsonResponse(res, { ok: false, msg: 'Unknown action' }, 400);
   }
 

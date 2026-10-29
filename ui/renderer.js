@@ -283,7 +283,13 @@ async function loadProfiles() {
   }
 }
 
+// Drag-to-reorder state — while a drag is in flight the 3s status poller must
+// not re-render the list (it would kill the in-motion drag).
+let dragSrcId = null;
+let isDragging = false;
+
 function renderProfiles() {
+  if (isDragging) return;
   const list = document.getElementById('profileList');
   if (!list) return;
 
@@ -319,7 +325,8 @@ function renderProfiles() {
       : '';
 
     return `
-      <div class="profile-row${selected}" data-id="${p.id}">
+      <div class="profile-row${selected}" data-id="${p.id}" draggable="true">
+        <span class="drag-grip" title="Drag to reorder">⋮⋮</span>
         <div class="profile-info" onclick="window.selectProfile('${p.id}')">
           <div class="profile-user">${p.username || 'Unknown'}${isSelectedForLogs}</div>
           <div class="profile-detail">${cities}</div>
@@ -340,6 +347,82 @@ function renderProfiles() {
       </div>
     `;
   }).join('');
+}
+
+// ---- Drag-to-reorder ----
+// Native HTML5 DnD delegated on #profileList (survives innerHTML re-renders).
+// Drag starts ONLY from the .drag-grip handle so the card's click/buttons stay
+// untouched; the reordered array IS the persisted state (config.local.json).
+
+function clearDropMarks(list) {
+  list.querySelectorAll('.drop-before, .drop-after').forEach((r) => {
+    r.classList.remove('drop-before', 'drop-after');
+    delete r._dropBefore;
+  });
+}
+
+function wireProfileReorder() {
+  const list = document.getElementById('profileList');
+  if (!list) return;
+
+  list.addEventListener('dragstart', (e) => {
+    const row = e.target.closest('.profile-row');
+    // Only the grip initiates a reorder drag — card clicks/buttons unchanged.
+    if (!row || !e.target.closest('.drag-grip')) { e.preventDefault(); return; }
+    dragSrcId = row.dataset.id;
+    isDragging = true;
+    row.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', dragSrcId);
+  });
+
+  list.addEventListener('dragover', (e) => {
+    if (!dragSrcId) return;
+    e.preventDefault(); // required for drop to fire
+    clearDropMarks(list);
+    const row = e.target.closest('.profile-row');
+    if (row && row.dataset.id !== dragSrcId) {
+      const rect = row.getBoundingClientRect();
+      row._dropBefore = e.clientY < rect.top + rect.height / 2;
+      row.classList.add(row._dropBefore ? 'drop-before' : 'drop-after');
+    }
+  });
+
+  list.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    if (!dragSrcId) return;
+    const row = e.target.closest('.profile-row');
+    const from = appState.profiles.findIndex((p) => p.id === dragSrcId);
+    if (row && row.dataset.id !== dragSrcId && from >= 0) {
+      const [moved] = appState.profiles.splice(from, 1);
+      // Recompute the target index AFTER removal — position must be exact
+      // whether the card moved up or down the list.
+      const to = appState.profiles.findIndex((p) => p.id === row.dataset.id);
+      appState.profiles.splice(row._dropBefore ? to : to + 1, 0, moved);
+      persistProfileOrder();
+    }
+    isDragging = false;
+    dragSrcId = null;
+    clearDropMarks(list);
+    renderProfiles();
+  });
+
+  list.addEventListener('dragend', () => {
+    isDragging = false;
+    dragSrcId = null;
+    clearDropMarks(list);
+    renderProfiles(); // flush any poll renders deferred while dragging
+  });
+}
+
+async function persistProfileOrder() {
+  try {
+    await fetch('/api/profiles', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'reorder', order: appState.profiles.map((p) => p.id) })
+    });
+  } catch { /* display already updated; a failed save is non-fatal */ }
 }
 
 function selectProfile(id) {
@@ -904,6 +987,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     await loadProfiles();
   }
 
+  wireProfileReorder();
   document.getElementById('addProfileBtn')?.addEventListener('click', () => openModal(null));
   document.getElementById('editProfilesBtn')?.addEventListener('click', openEditList);
   document.getElementById('reloadProfilesBtn')?.addEventListener('click', () => loadProfiles());

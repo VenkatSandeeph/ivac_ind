@@ -325,7 +325,7 @@ button.pulse {
 
 .profile-row {
   display: grid;
-  grid-template-columns: 1fr auto 320px;
+  grid-template-columns: 18px 1fr auto 320px;
   gap: 12px;
   align-items: center;
   padding: 12px;
@@ -335,6 +335,24 @@ button.pulse {
   cursor: pointer;
   transition: box-shadow 0.15s, border-color 0.15s;
 }
+
+.profile-row .drag-grip {
+  cursor: grab;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+  letter-spacing: -2px;
+  user-select: none;
+  text-align: center;
+}
+
+.profile-row .drag-grip:active { cursor: grabbing; }
+
+.profile-row.dragging { opacity: 0.45; }
+
+.profile-row.drop-before { border-top: 3px solid var(--accent); }
+
+.profile-row.drop-after { border-bottom: 3px solid var(--accent); }
 
 .profile-row:hover {
   border-color: var(--accent);
