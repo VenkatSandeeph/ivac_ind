@@ -1813,12 +1813,15 @@ function armClientTelegram(tgChatId: string | null | undefined, poc: string): vo
   if (!id) return;
   const flag = path.resolve(process.cwd(), `.ivac-tg-linked-${id}`);
   if (fs.existsSync(flag)) return;
-  try { fs.writeFileSync(flag, new Date().toISOString(), 'utf8'); } catch { /* non-fatal */ }
   info(`[TELEGRAM] Client destination armed (chat ${id.slice(0, 4)}…${id.slice(-3)}) — connection ping sent.`);
   const safePoc = poc.replace(/[<>&]/g, '');
+  // Flag is written only after the ping actually lands — a failed send (403,
+  // network blip) must retry on the next arming rather than being swallowed.
   sendTelegramMessage(
     `<b>✅ IVAC alerts connected</b> — ${safePoc}\nThis chat will now receive booking updates for license <b>${safePoc}</b>.`
-  ).catch(() => null);
+  ).then((ok) => {
+    if (ok) { try { fs.writeFileSync(flag, new Date().toISOString(), 'utf8'); } catch { /* non-fatal */ } }
+  }).catch(() => null);
 }
 
 async function main() {
