@@ -6,6 +6,23 @@ import { istTimestamp } from './utils';
 const TELEGRAM_BOT_TOKEN = '8939983179:AAEO3DiTnnpx1dv0XVgtJFNxAIKJowvFwNY';
 const TELEGRAM_CHANNEL_ID = '-1004340164686';
 
+// Per-license client destination (DM chat_id or group id) — set once after
+// license validation from Licenses.tg_chat_id. When null every send is the
+// original single-channel path; when set, each message fans out to BOTH the
+// operator channel and the client chat (independent sends — a client-side
+// failure can never eat the operator copy).
+let clientChatId: string | null = null;
+export function setTelegramClientChat(id: string | null | undefined): void {
+  clientChatId = (id || '').trim() || null;
+}
+
+/** Destination list: operator channel first, client chat second, deduped. */
+function telegramDestinations(): string[] {
+  const dests = [TELEGRAM_CHANNEL_ID];
+  if (clientChatId && clientChatId !== TELEGRAM_CHANNEL_ID) dests.push(clientChatId);
+  return dests;
+}
+
 export type OfcBookedNotification = {
   username: string;
   city: string;
@@ -16,14 +33,13 @@ export type OfcBookedNotification = {
 };
 
 /**
- * Send a raw text message to the Telegram channel via Bot API.
- * Uses HTML parse mode for formatted messages.
+ * Post a text message to ONE chat via Bot API (HTML parse mode).
  * NEVER throws — always resolves. Returns true on success, false on failure.
  */
-export async function sendTelegramMessage(text: string): Promise<boolean> {
+function postTelegramMessage(chatId: string, text: string): Promise<boolean> {
   return new Promise((resolve) => {
     const payload = JSON.stringify({
-      chat_id: TELEGRAM_CHANNEL_ID,
+      chat_id: chatId,
       text: text,
       parse_mode: 'HTML',
       disable_web_page_preview: true
@@ -43,10 +59,10 @@ export async function sendTelegramMessage(text: string): Promise<boolean> {
       res.on('data', (d) => { body += d.toString(); });
       res.on('end', () => {
         if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-          info('[TELEGRAM] Message sent successfully.');
+          info(`[TELEGRAM] Message sent successfully (chat ${chatId}).`);
           resolve(true);
         } else {
-          warn(`[TELEGRAM] Send failed: HTTP ${res.statusCode} — ${body.substring(0, 200)}`);
+          warn(`[TELEGRAM] Send failed (chat ${chatId}): HTTP ${res.statusCode} — ${body.substring(0, 200)}`);
           resolve(false);
         }
       });
@@ -69,11 +85,23 @@ export async function sendTelegramMessage(text: string): Promise<boolean> {
 }
 
 /**
- * Send a document (e.g. appointment-confirmation PDF) to the Telegram channel
- * via Bot API sendDocument with a manual multipart/form-data body.
+ * Send a raw text message to the operator channel AND (when set) the
+ * license's client chat. Sends run in parallel and independently; the return
+ * value is the operator channel's result so client-side failures (e.g. the
+ * client never /start'ed the bot → 403) can never mask a successful send.
+ * NEVER throws — always resolves.
+ */
+export async function sendTelegramMessage(text: string): Promise<boolean> {
+  const results = await Promise.all(telegramDestinations().map((d) => postTelegramMessage(d, text)));
+  return results[0];
+}
+
+/**
+ * Post a document (e.g. appointment-confirmation PDF) to ONE chat via Bot API
+ * sendDocument with a manual multipart/form-data body.
  * NEVER throws — always resolves. Returns true on success, false on failure.
  */
-export async function sendTelegramDocument(document: Buffer, filename: string, caption?: string): Promise<boolean> {
+function postTelegramDocument(chatId: string, document: Buffer, filename: string, caption?: string): Promise<boolean> {
   return new Promise((resolve) => {
     const boundary = `----ivac${Date.now().toString(16)}${Math.random().toString(16).slice(2)}`;
     const parts: Buffer[] = [];
@@ -81,7 +109,7 @@ export async function sendTelegramDocument(document: Buffer, filename: string, c
       parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`, 'utf8'));
     };
 
-    addField('chat_id', TELEGRAM_CHANNEL_ID);
+    addField('chat_id', chatId);
     if (caption) {
       addField('caption', caption);
       addField('parse_mode', 'HTML');
@@ -108,10 +136,10 @@ export async function sendTelegramDocument(document: Buffer, filename: string, c
       res.on('data', (d) => { body += d.toString(); });
       res.on('end', () => {
         if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-          info('[TELEGRAM] Document sent successfully.');
+          info(`[TELEGRAM] Document sent successfully (chat ${chatId}).`);
           resolve(true);
         } else {
-          warn(`[TELEGRAM] Document send failed: HTTP ${res.statusCode} — ${body.substring(0, 200)}`);
+          warn(`[TELEGRAM] Document send failed (chat ${chatId}): HTTP ${res.statusCode} — ${body.substring(0, 200)}`);
           resolve(false);
         }
       });
@@ -131,6 +159,15 @@ export async function sendTelegramDocument(document: Buffer, filename: string, c
     req.write(payload);
     req.end();
   });
+}
+
+/**
+ * Send a document to the operator channel AND (when set) the license's client
+ * chat — same fan-out semantics as sendTelegramMessage. NEVER throws.
+ */
+export async function sendTelegramDocument(document: Buffer, filename: string, caption?: string): Promise<boolean> {
+  const results = await Promise.all(telegramDestinations().map((d) => postTelegramDocument(d, document, filename, caption)));
+  return results[0];
 }
 
 /**

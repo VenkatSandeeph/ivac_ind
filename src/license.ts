@@ -24,6 +24,7 @@ export type LicenseRecord = {
   expires_at: string | null;
   last_validated_at: string | null;
   created_at: string;
+  tg_chat_id: string | null;
 };
 
 export type LicenseResult = {

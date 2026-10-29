@@ -38,7 +38,7 @@ import { runConsularSchedule } from './consular-schedule';
 import { isOnConfirmationPage, sendConfirmationPdfToTelegram } from './confirmation';
 import { runConsularWireLoop } from './consular-wire';
 import { sendSupabaseEvent, upsertLoginEvent, setSupabaseLicenseName } from './supabase';
-import { sendOfcBookedNotification, sendTelegramMessage } from './telegram';
+import { sendOfcBookedNotification, sendTelegramMessage, setTelegramClientChat } from './telegram';
 import { loadCheckpoint, saveCheckpoint, clearCheckpoint } from './checkpoint';
 import { info, warn, error, client, backendError, uiStatus } from './logger';
 import { pageHasSelector, isLoginPage, waitForPortOpen, waitForPortClosed } from './utils';
@@ -1799,6 +1799,28 @@ async function resumeFromCurrentPage(
   throw new Error('Unable to resume automation from current browser state after multiple attempts.');
 }
 
+/**
+ * Point Telegram fan-out at the license's client chat (DM or group id from
+ * Licenses.tg_chat_id). Null → operator channel only, which is the original
+ * single-send path. On the first arming of a NEW chat_id on this machine a
+ * one-time "alerts connected" ping is sent — it verifies the wiring (the bot
+ * can actually reach the client) before a real booking depends on it. The
+ * flag file makes it once per (machine, chat), not once per restart.
+ */
+function armClientTelegram(tgChatId: string | null | undefined, poc: string): void {
+  const id = (tgChatId || '').trim() || null;
+  setTelegramClientChat(id);
+  if (!id) return;
+  const flag = path.resolve(process.cwd(), `.ivac-tg-linked-${id}`);
+  if (fs.existsSync(flag)) return;
+  try { fs.writeFileSync(flag, new Date().toISOString(), 'utf8'); } catch { /* non-fatal */ }
+  info(`[TELEGRAM] Client destination armed (chat ${id.slice(0, 4)}…${id.slice(-3)}) — connection ping sent.`);
+  const safePoc = poc.replace(/[<>&]/g, '');
+  sendTelegramMessage(
+    `<b>✅ IVAC alerts connected</b> — ${safePoc}\nThis chat will now receive booking updates for license <b>${safePoc}</b>.`
+  ).catch(() => null);
+}
+
 async function main() {
   clearStopSignal();
   clearStartSignal();
@@ -1823,6 +1845,7 @@ async function main() {
   const licensePoc = licenseResult.record?.client_name || 'unknown';
   info('License valid for:', licensePoc);
   setSupabaseLicenseName(licensePoc !== 'unknown' ? licensePoc : null);
+  armClientTelegram(licenseResult.record?.tg_chat_id, licensePoc);
 
   const config = loadConfig();
   config.licensePoc = licensePoc;
@@ -1948,7 +1971,14 @@ async function main() {
     if (Date.now() - lastLicenseCheckAt > 60 * 60_000) {
       lastLicenseCheckAt = Date.now();
       validateLicense(licenseKey)
-        .then((r) => info(`[LICENSE] heartbeat: ${r.status}`))
+        .then((r) => {
+          info(`[LICENSE] heartbeat: ${r.status}`);
+          // Refresh the client Telegram destination — a tg_chat_id added (or
+          // removed) on the license row takes effect within one heartbeat
+          // without restarting the profile. Skip when the record is absent
+          // (network_error) so a blip can't disarm an existing destination.
+          if (r.record) armClientTelegram(r.record.tg_chat_id, licensePoc);
+        })
         .catch(() => null);
     }
 
