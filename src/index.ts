@@ -448,20 +448,24 @@ async function runConsularStageWithRecovery(
         const nowOfc = await isOfcSchedulePage(page).catch(() => false);
         if (nowOfc) {
           // Stage mismatch: the session landed on the OFC page while the
-          // consular stage is running (e.g. a Cloudflare/session bounce
-          // re-routed the schedule link). resumeFromCurrentPage treats OFC as
-          // a terminal state, so without this detour the loop spins forever —
-          // wait -> resume -> OFC -> return -> wait. Re-enter via the home
-          // page so the site itself routes to the correct stage; backoff
-          // grows per consecutive detour so a genuinely OFC-bound session
-          // (e.g. OFC released for rebooking) doesn't ping-pong.
+          // consular stage is running. Try the consular reschedule URL
+          // directly — the home dashboard's Reschedule link resolves to the
+          // OFC page for both-appointments-booked accounts, so the home
+          // detour alone can never reach consular there. On a miss (consular
+          // not booked yet → site bounces to home, CF, transient) fall back
+          // to the home-link route; backoff still applies so a genuinely
+          // OFC-bound session doesn't ping-pong.
           consularOfcDetours += 1;
           const detourWaitMs = Math.min(120000, 15000 * consularOfcDetours);
-          warn(`Consular monitoring: recovery landed on the OFC page (detour #${consularOfcDetours}) — re-entering via home so the site routes to consular; next check in ${(detourWaitMs / 1000).toFixed(0)}s.`);
-          uiStatus('Recovering — re-entering consular via home');
-          await reenterScheduleViaHome(page, config);
-          if (await sleepWithStopSignal(detourWaitMs)) {
-            await pauseForStop(page, config);
+          warn(`Consular monitoring: recovery landed on the OFC page (detour #${consularOfcDetours}) — re-entering consular directly; next check in ${(detourWaitMs / 1000).toFixed(0)}s.`);
+          uiStatus('Recovering — re-entering consular');
+          const reached = await enterConsularSchedule(page, config);
+          if (!reached) {
+            uiStatus('Recovering — re-entering consular via home');
+            await reenterScheduleViaHome(page, config);
+            if (await sleepWithStopSignal(detourWaitMs)) {
+              await pauseForStop(page, config);
+            }
           }
           continue;
         }
@@ -1395,6 +1399,27 @@ function resetScheduleSuppressionFlags() {
 }
 
 const SCHEDULE_SUPPRESSION_COOLDOWN_MS = 15 * 60 * 1000;
+
+/**
+ * Direct entry to the consular schedule page. Accounts with a consular
+ * appointment already booked serve the form only at the reschedule variant —
+ * plain /en-US/schedule/ redirects to home (nothing new to book), and the
+ * home dashboard's Reschedule link routes to the OFC page, so the home
+ * detour can never reach consular for those accounts (verified live: a
+ * consular-stage profile looped home→OFC for 15+ min). Returns true when the
+ * landing URL is the consular schedule page — a form-suppressed landing
+ * still counts: the loop-top suppression probe owns that path (wire mode).
+ */
+async function enterConsularSchedule(page: any, config: AutomationConfig): Promise<boolean> {
+  const target = getHomePageUrl(config.scheduleUrl) + 'schedule/?reschedule=true';
+  try {
+    await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  } catch { /* landing may still have happened — the URL check decides */ }
+  // #post_select renders just after domcontentloaded on healthy loads; its
+  // absence is not a miss (suppressed pages have no form) — the URL is.
+  await page.waitForSelector('#post_select', { timeout: 8000 }).catch(() => null);
+  return urlIsConsularSchedule(page.url());
+}
 
 /** Re-enter the schedule flow the canonical way: home page -> schedule/reschedule link. */
 async function reenterScheduleViaHome(page: any, config: AutomationConfig): Promise<void> {
