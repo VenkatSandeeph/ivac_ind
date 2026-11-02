@@ -875,10 +875,16 @@ const STOP_SIGNAL_FILE = path.resolve(process.cwd(), '.ivac-stop-' + (process.en
 // the next loop-top `checkStopSignal() || stopRequested` still routes into
 // the paused listener instead of silently resuming work.
 let stopRequested = false;
+// Timestamp written inside the stop flag by the UI (Date.now() at click).
+// pauseAndListen compares queued start flags against it — a start flag the
+// user wrote AFTER clicking Stop is a live resume request, not a stale file.
+let stopRequestedAt = 0;
 
 function checkStopSignal(): boolean {
   try {
     if (fs.existsSync(STOP_SIGNAL_FILE)) {
+      const raw = fs.readFileSync(STOP_SIGNAL_FILE, 'utf8').trim();
+      stopRequestedAt = Number(raw) || Date.now();
       fs.unlinkSync(STOP_SIGNAL_FILE);
       stopRequested = true;
       return true;
@@ -945,12 +951,31 @@ function clearStartSignal(): void {
   try { fs.unlinkSync(START_SIGNAL_FILE); } catch { /* ignore */ }
 }
 
+// Reads the start flag's timestamp WITHOUT consuming it — the UI writes
+// Date.now() into the file; mtime is the fallback for non-numeric content.
+function peekStartSignalTime(): number | null {
+  try {
+    if (!fs.existsSync(START_SIGNAL_FILE)) return null;
+    const ts = Number(fs.readFileSync(START_SIGNAL_FILE, 'utf8').trim());
+    return Number.isFinite(ts) && ts > 0 ? ts : fs.statSync(START_SIGNAL_FILE).mtimeMs;
+  } catch { return null; }
+}
+
 async function pauseAndListen(page: Page, config: AutomationConfig): Promise<'resume' | 'exit'> {
-  // Consume any start flag written BEFORE this pause began (e.g. UI clicks
-  // queued while the core was still working) — only a signal written during
-  // the pause itself may resume it, otherwise a stale file would instantly
-  // un-pause a Stop the user just requested.
+  // The UI marks the profile paused the instant Stop is clicked, so a Start
+  // click can land while the core is still unwinding into this pause. Honor a
+  // start flag written AFTER the stop flag — it's a live resume request.
+  // Anything older is a stale leftover: delete it so it can't un-pause later.
+  const queuedStartAt = peekStartSignalTime();
+  if (queuedStartAt !== null && stopRequestedAt > 0 && queuedStartAt > stopRequestedAt) {
+    try { fs.unlinkSync(START_SIGNAL_FILE); } catch { /* ignore */ }
+    clearStopSignal();
+    info('[RESUMED] Start signal received — resuming automation.');
+    client('▶️', 'Resumed');
+    return 'resume';
+  }
   clearStartSignal();
+  clearStopSignal(); // drop a stop flag double-clicked during the unwind
   info('[STOPPED] Paused — listening for account updates (click Start to resume).');
   client('⏹️', 'Stopped — listening (click Start to resume)');
 
@@ -981,13 +1006,20 @@ async function pauseAndListen(page: Page, config: AutomationConfig): Promise<'re
     for (;;) {
       await new Promise((r) => setTimeout(r, 2500));
       if (checkStartSignal()) {
+        clearStopSignal(); // drop stop flags clicked while already paused
         info('[RESUMED] Start signal received — resuming automation.');
         client('▶️', 'Resumed');
         return 'resume';
       }
       // Liveness probe — page.url() is a local cache that survives browser
       // death, so probe the target itself (read-only eval, no page action).
-      await page.evaluate(() => 1);
+      // Bounded at 10s: a wedged CDP session would otherwise stall the loop
+      // for the full protocol timeout, leaving start flags unread for minutes.
+      await Promise.race([
+        page.evaluate(() => 1),
+        new Promise<never>((_r, reject) =>
+          setTimeout(reject, 10000, new Error('pause liveness probe timeout'))),
+      ]);
       const url = page.url();
       if (!consularReported && url.includes('appointment-confirmation')) {
         consularReported = true;

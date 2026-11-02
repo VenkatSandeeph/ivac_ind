@@ -469,8 +469,22 @@ async function startProfile(profileId) {
     // Paused listener is alive → write the resume flag; the core continues
     // its loop from where it paused instead of spawning a new process.
     if (rec.paused) {
-      try { fs.writeFileSync(getStartSignalFile(profileId), String(Date.now())); } catch {}
+      const flagFile = getStartSignalFile(profileId);
+      const resumeTs = String(Date.now());
+      try { fs.writeFileSync(flagFile, resumeTs); } catch {}
       appendLog(profileId, '[UI] Resume signal sent to paused profile.\n');
+      // Watchdog — a healthy paused core consumes the flag within ~3s. If it
+      // is still sitting there the pause loop is wedged: tell the user instead
+      // of silently accepting more clicks.
+      setTimeout(() => {
+        try {
+          const cur = runningProfiles.get(profileId);
+          if (cur && cur.paused && fs.existsSync(flagFile)
+              && fs.readFileSync(flagFile, 'utf8').trim() === resumeTs) {
+            appendLog(profileId, '[UI] Resume flag not consumed after 12s — core may be wedged. Click Stop then Start, or relaunch the profile.\n');
+          }
+        } catch {}
+      }, 12000).unref();
       return { ok: true, msg: 'Resume sent' };
     }
     return { ok: false, msg: 'Already running' };
@@ -494,6 +508,7 @@ async function startProfile(profileId) {
   if (!fs.existsSync(chromeDir)) fs.mkdirSync(chromeDir, { recursive: true });
 
   try { fs.unlinkSync(getStopSignalFile(profileId)); } catch {}
+  try { fs.unlinkSync(getStartSignalFile(profileId)); } catch {}
 
   let cmd, args, useShell;
   if (IS_PACKAGED) {
@@ -558,13 +573,17 @@ async function startProfile(profileId) {
   child.on('error', (err) => {
     appendLog(profileId, '[UI] Failed to start: ' + err.message + '\n');
     console.error('[main] spawn error for', profile.username, ':', err.message);
-    runningProfiles.delete(profileId);
+    // Only clear the slot if it still holds THIS process — a stale process
+    // erroring late must not delete a freshly spawned rec.
+    const cur = runningProfiles.get(profileId);
+    if (cur && cur.process === child) runningProfiles.delete(profileId);
   });
 
   child.on('close', (code) => {
     appendLog(profileId, '[UI] Script exited with code ' + code + '\n');
     console.log('[main] child process for', profile.username, 'exited with code', code);
-    runningProfiles.delete(profileId);
+    const cur = runningProfiles.get(profileId);
+    if (cur && cur.process === child) runningProfiles.delete(profileId);
   });
 
   return { ok: true, msg: 'Started', profileId };
