@@ -146,6 +146,24 @@ async function waitForLoginPage(page: Page, timeout = 30000) {
   throw new Error('Login page did not render expected input fields within timeout.');
 }
 
+// Account-block rendered on the sign-in page itself ("Login not allowed for
+// your account at this moment / temporarily blocked due to prohibited use of
+// automation"). Returns true when the block text is present — callers must NOT
+// keep re-submitting credentials into a flagged account.
+const ACCOUNT_BLOCK_RE = /not allowed for your account|may have been temporarily blocked|temporarily blocked due to|prohibited use of automation/i;
+async function signInPageShowsAccountBlock(page: Page): Promise<boolean> {
+  const bodyText = (await page.locator('body').innerText().catch(() => '')) || '';
+  return ACCOUNT_BLOCK_RE.test(bodyText);
+}
+
+async function bailOnAccountBlock(page: Page, config: AutomationConfig): Promise<void> {
+  client('⛔', 'Account temporarily blocked by the site — stopping automation. Do not retry login; contact support to unblock.');
+  warn('[LOGIN_BLOCKED] Account block detected on sign-in page — no further login attempts.');
+  const { sendTelegramMessage } = await import('./telegram');
+  sendTelegramMessage(`⛔ <b>Account temporarily blocked</b>\n<b>Profile:</b> ${config.username}\nSign-in page shows an account block — automation stopped, no further login attempts.`).catch(() => false);
+  throw new Error('ACCOUNT_BLOCKED');
+}
+
 export async function login(page: Page, config: AutomationConfig) {
   const alreadyOnLogin = await isLoginFormPresent(page);
   if (!alreadyOnLogin) {
@@ -190,6 +208,10 @@ export async function login(page: Page, config: AutomationConfig) {
     throw new Error('Password field was not found on login page.');
   }
 
+  // Pre-submit: a resumed session may already be sitting on the blocked page —
+  // never submit credentials into a flagged account.
+  if (await signInPageShowsAccountBlock(page)) await bailOnAccountBlock(page, config);
+
   // Attempt submission with retries: sometimes the site shows a "Sign in" button
   // on an intermediate error page; click it to return to the login form and retry.
   const maxAttempts = 3;
@@ -225,6 +247,11 @@ export async function login(page: Page, config: AutomationConfig) {
         throw new Error('Invalid credentials detected on login page');
       }
     }
+
+    // Post-submit: if the account-block message rendered, stop retrying NOW —
+    // clicking the intermediate Sign-in again is just another submission into
+    // a flagged account.
+    if (await signInPageShowsAccountBlock(page)) await bailOnAccountBlock(page, config);
 
     // Detect an intermediate page that shows a Sign in / Signin link/button
     const signInAgain = await firstMatchingLocator(page, [
