@@ -632,6 +632,8 @@ function openModal(profile) {
     document.getElementById('pConsularStartDate').value = cons.startDate || '';
     document.getElementById('pConsularEndDate').value = cons.endDate || '';
     document.getElementById('pConsularCityRetry').value = cons.cityRetrySeconds ?? 15;
+    document.getElementById('pAutomateConsular').checked = cons.automate !== false;
+    updateConsularFieldsEnabled();
     document.getElementById('pDebugPort').value = profile.chromeRemoteDebugPort || 9222;
     document.getElementById('pUserDataDir').value = profile.chromeUserDataDir || '';
   } else {
@@ -653,9 +655,13 @@ function openModal(profile) {
     document.getElementById('pConsularStartDate').value = '';
     document.getElementById('pConsularEndDate').value = '';
     document.getElementById('pConsularCityRetry').value = 15;
+    document.getElementById('pAutomateConsular').checked = true;
+    updateConsularFieldsEnabled();
     document.getElementById('pDebugPort').value = 9222;
     document.getElementById('pUserDataDir').value = '';
   }
+
+  document.getElementById('pAutomateConsular').onchange = updateConsularFieldsEnabled;
 
   // Focus the first input
   setTimeout(() => {
@@ -705,6 +711,15 @@ function collectCities() {
   const cities = [];
   document.querySelectorAll('.city-checks input:checked').forEach((cb) => cities.push(cb.value));
   return cities;
+}
+
+// AUTOMATE CONSULAR toggle: grey out the consular inputs when off (values
+// kept — just not editable). The checkbox itself always stays enabled.
+function updateConsularFieldsEnabled() {
+  const on = document.getElementById('pAutomateConsular').checked;
+  const wrap = document.getElementById('consularFields');
+  wrap.querySelectorAll('input').forEach((el) => { el.disabled = !on; });
+  wrap.style.opacity = on ? '1' : '0.45';
 }
 
 function collectConsularCities() {
@@ -788,13 +803,15 @@ function buildProfileFromForm(onDone) {
   const consularEndDate = document.getElementById('pConsularEndDate').value;
   const ccr = parseInt(document.getElementById('pConsularCityRetry').value, 10);
   const consular = {
+    automate: document.getElementById('pAutomateConsular').checked,
     city: consularCities,
     startDate: consularStartDate,
     endDate: consularEndDate,
     cityRetrySeconds: Number.isFinite(ccr) && ccr > 0 ? ccr : 15
   };
 
-  if (consularStartDate || consularEndDate) {
+  // Dates are ignored while automation is off — skip their validation.
+  if (consular.automate && (consularStartDate || consularEndDate)) {
     if (!consularStartDate || !consularEndDate) {
       showAlert('Set both consular dates, or leave both empty for the auto range.', onDone);
       return;

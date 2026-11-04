@@ -1,0 +1,352 @@
+[
+  {
+    "port": "8001",
+    "expected": "45.155.196.8",
+    "exitIp": "45.155.196.8",
+    "ipMatch": true,
+    "proxyUp": true,
+    "siteStatus": 403,
+    "verdict": "NAV_FAIL(timeout)",
+    "ms": 9089
+  },
+  {
+    "port": "8002",
+    "expected": "31.98.3.61",
+    "exitIp": "31.98.3.61",
+    "ipMatch": true,
+    "proxyUp": true,
+    "siteStatus": 403,
+    "verdict": "UNKNOWN(http=403)",
+    "ms": 8527
+  },
+  {
+    "port": "8003",
+    "expected": "108.165.101.5",
+    "exitIp": "31.98.1.109",
+    "ipMatch": false,
+    "proxyUp": true,
+    "siteStatus": 403,
+    "verdict": "NAV_FAIL(timeout)",
+    "ms": 7877
+  },
+  {
+    "port": "8004",
+    "expected": "45.155.198.1",
+    "exitIp": "31.98.2.87",
+    "ipMatch": false,
+    "proxyUp": true,
+    "siteStatus": 403,
+    "verdict": "NAV_FAIL(timeout)",
+    "ms": 7116
+  },
+  {
+    "port": "8005",
+    "expected": "45.155.197.0",
+    "exitIp": "45.92.104.139",
+    "ipMatch": false,
+    "proxyUp": true,
+    "siteStatus": 403,
+    "verdict": "NAV_FAIL(timeout)",
+    "ms": 6412
+  },
+  {
+    "port": "8006",
+    "expected": "31.98.1.109",
+    "exitIp": "45.92.104.19",
+    "ipMatch": false,
+    "proxyUp": true,
+    "siteStatus": null,
+    "verdict": "NAV_FAIL(ERR_ABORTED)",
+    "ms": 5569
+  },
+  {
+    "port": "8007",
+    "expected": "31.98.2.87",
+    "exitIp": "45.92.105.6",
+    "ipMatch": false,
+    "proxyUp": true,
+    "siteStatus": 403,
+    "verdict": "CF_CHALLENGE",
+    "ms": 20856
+  },
+  {
+    "port": "8008",
+    "expected": "45.92.104.139",
+    "exitIp": "45.92.105.92",
+    "ipMatch": false,
+    "proxyUp": true,
+    "siteStatus": 403,
+    "verdict": "CF_CHALLENGE",
+    "ms": 20857
+  },
+  {
+    "port": "8009",
+    "expected": "45.92.105.92",
+    "exitIp": "45.92.106.36",
+    "ipMatch": false,
+    "proxyUp": true,
+    "siteStatus": 403,
+    "verdict": "CF_CHALLENGE",
+    "ms": 20856
+  },
+  {
+    "port": "8010",
+    "expected": "45.92.106.36",
+    "exitIp": "45.92.107.14",
+    "ipMatch": false,
+    "proxyUp": true,
+    "siteStatus": 403,
+    "verdict": "CF_CHALLENGE",
+    "ms": 16024
+  },
+  {
+    "port": "8011",
+    "expected": "45.92.107.14",
+    "exitIp": "64.105.212.187",
+    "ipMatch": false,
+    "proxyUp": true,
+    "siteStatus": 403,
+    "verdict": "CF_CHALLENGE",
+    "ms": 16786
+  },
+  {
+    "port": "8012",
+    "expected": "64.105.230.22",
+    "exitIp": "64.105.213.81",
+    "ipMatch": false,
+    "proxyUp": true,
+    "siteStatus": 403,
+    "verdict": "CF_CHALLENGE",
+    "ms": 17486
+  },
+  {
+    "port": "8013",
+    "expected": "64.105.231.9",
+    "exitIp": "198.145.55.91",
+    "ipMatch": false,
+    "proxyUp": true,
+    "siteStatus": 403,
+    "verdict": "CF_CHALLENGE",
+    "ms": 19042
+  },
+  {
+    "port": "8014",
+    "expected": "82.27.244.7",
+    "exitIp": "198.145.55.92",
+    "ipMatch": false,
+    "proxyUp": true,
+    "siteStatus": 403,
+    "verdict": "CF_CHALLENGE",
+    "ms": 19043
+  },
+  {
+    "port": "8015",
+    "expected": "64.139.62.22",
+    "exitIp": "198.145.53.63",
+    "ipMatch": false,
+    "proxyUp": true,
+    "siteStatus": 403,
+    "verdict": "CF_CHALLENGE",
+    "ms": 19042
+  },
+  {
+    "port": "8016",
+    "expected": "64.139.63.10",
+    "exitIp": "198.145.53.64",
+    "ipMatch": false,
+    "proxyUp": true,
+    "siteStatus": 403,
+    "verdict": "CF_CHALLENGE",
+    "ms": 18422
+  },
+  {
+    "port": "8017",
+    "expected": "62.192.120.49",
+    "exitIp": "198.145.54.89",
+    "ipMatch": false,
+    "proxyUp": true,
+    "siteStatus": 403,
+    "verdict": "CF_CHALLENGE",
+    "ms": 19041
+  },
+  {
+    "port": "8018",
+    "expected": "62.192.121.23",
+    "exitIp": "198.145.54.90",
+    "ipMatch": false,
+    "proxyUp": true,
+    "siteStatus": 403,
+    "verdict": "CF_CHALLENGE",
+    "ms": 19042
+  },
+  {
+    "port": "8019",
+    "expected": "62.192.122.21",
+    "exitIp": "217.180.44.14",
+    "ipMatch": false,
+    "proxyUp": true,
+    "siteStatus": null,
+    "verdict": "NAV_FAIL(ERR_TUNNEL_CONNECTION_FAILED)",
+    "ms": 4162
+  },
+  {
+    "port": "8020",
+    "expected": "62.192.123.17",
+    "exitIp": "31.98.28.82",
+    "ipMatch": false,
+    "proxyUp": true,
+    "siteStatus": 403,
+    "verdict": "CF_CHALLENGE",
+    "ms": 17432
+  },
+  {
+    "port": "8021",
+    "expected": "205.188.212.6",
+    "exitIp": "195.40.58.22",
+    "ipMatch": false,
+    "proxyUp": true,
+    "siteStatus": 403,
+    "verdict": "CF_CHALLENGE",
+    "ms": 17633
+  },
+  {
+    "port": "8022",
+    "expected": "205.188.212.7",
+    "exitIp": "195.40.32.39",
+    "ipMatch": false,
+    "proxyUp": true,
+    "siteStatus": null,
+    "verdict": "NAV_FAIL(ERR_TUNNEL_CONNECTION_FAILED)",
+    "ms": 4288
+  },
+  {
+    "port": "8023",
+    "expected": "205.188.213.1",
+    "exitIp": "195.40.32.71",
+    "ipMatch": false,
+    "proxyUp": true,
+    "siteStatus": null,
+    "verdict": "NAV_FAIL(ERR_TUNNEL_CONNECTION_FAILED)",
+    "ms": 3850
+  },
+  {
+    "port": "8024",
+    "expected": "217.180.44.14",
+    "exitIp": "195.40.32.72",
+    "ipMatch": false,
+    "proxyUp": true,
+    "siteStatus": null,
+    "verdict": "NAV_FAIL(ERR_TUNNEL_CONNECTION_FAILED)",
+    "ms": 3913
+  },
+  {
+    "port": "8025",
+    "expected": "31.98.28.82",
+    "exitIp": "195.40.33.26",
+    "ipMatch": false,
+    "proxyUp": true,
+    "siteStatus": 403,
+    "verdict": "CF_CHALLENGE",
+    "ms": 17382
+  },
+  {
+    "port": "8026",
+    "expected": "195.40.58.22",
+    "exitIp": "195.40.33.47",
+    "ipMatch": false,
+    "proxyUp": true,
+    "siteStatus": 403,
+    "verdict": "CF_CHALLENGE",
+    "ms": 17605
+  },
+  {
+    "port": "8027",
+    "expected": "189.81.82.3",
+    "exitIp": "192.177.95.57",
+    "ipMatch": false,
+    "proxyUp": true,
+    "siteStatus": 403,
+    "verdict": "CF_CHALLENGE",
+    "ms": 17594
+  },
+  {
+    "port": "8028",
+    "expected": "189.81.82.4",
+    "exitIp": "201.14.226.10",
+    "ipMatch": false,
+    "proxyUp": true,
+    "siteStatus": 403,
+    "verdict": "CF_CHALLENGE",
+    "ms": 17841
+  },
+  {
+    "port": "8029",
+    "expected": "189.81.83.2",
+    "exitIp": "201.14.226.9",
+    "ipMatch": false,
+    "proxyUp": true,
+    "siteStatus": 403,
+    "verdict": "CF_CHALLENGE",
+    "ms": 17841
+  },
+  {
+    "port": "8030",
+    "expected": "195.40.32.39",
+    "exitIp": "201.14.229.10",
+    "ipMatch": false,
+    "proxyUp": true,
+    "siteStatus": 403,
+    "verdict": "CF_CHALLENGE",
+    "ms": 17842
+  },
+  {
+    "port": "8031",
+    "expected": "195.40.33.26",
+    "exitIp": "201.14.233.10",
+    "ipMatch": false,
+    "proxyUp": true,
+    "siteStatus": 403,
+    "verdict": "CF_CHALLENGE",
+    "ms": 16633
+  },
+  {
+    "port": "8032",
+    "expected": "50.118.136.15",
+    "exitIp": "198.145.234.13",
+    "ipMatch": false,
+    "proxyUp": true,
+    "siteStatus": 403,
+    "verdict": "CF_CHALLENGE",
+    "ms": 17993
+  },
+  {
+    "port": "8033",
+    "expected": "50.118.136.16",
+    "exitIp": "198.145.234.19",
+    "ipMatch": false,
+    "proxyUp": true,
+    "siteStatus": 403,
+    "verdict": "CF_CHALLENGE",
+    "ms": 17475
+  },
+  {
+    "port": "8034",
+    "expected": "192.177.95.57",
+    "exitIp": "189.104.87.33",
+    "ipMatch": false,
+    "proxyUp": true,
+    "siteStatus": 403,
+    "verdict": "CF_CHALLENGE",
+    "ms": 17261
+  },
+  {
+    "port": "8035",
+    "expected": "23.230.208.12",
+    "exitIp": "189.104.87.34",
+    "ipMatch": false,
+    "proxyUp": true,
+    "siteStatus": 403,
+    "verdict": "CF_CHALLENGE",
+    "ms": 17484
+  }
+]

@@ -38,7 +38,7 @@ import { runConsularSchedule } from './consular-schedule';
 import { isOnConfirmationPage, sendConfirmationPdfToTelegram } from './confirmation';
 import { runConsularWireLoop } from './consular-wire';
 import { sendSupabaseEvent, upsertLoginEvent, setSupabaseLicenseName } from './supabase';
-import { sendOfcBookedNotification, sendTelegramMessage, setTelegramClientChat } from './telegram';
+import { sendOfcBookedNotification, sendAccountBlockedNotification, sendTelegramMessage, setTelegramClientChat } from './telegram';
 import { loadCheckpoint, saveCheckpoint, clearCheckpoint } from './checkpoint';
 import { info, warn, error, client, backendError, uiStatus } from './logger';
 import { pageHasSelector, isLoginPage, waitForPortOpen, waitForPortClosed } from './utils';
@@ -51,7 +51,7 @@ import {
   STATIC_ROTATE_FLAG,
   type StaticProxyRelay
 } from './static-proxy';
-import { setupApiResponseCapture, runDirectOfcFlow, resetCapturedScheduleData, getMemberQueryResult, resetMemberQueryResult, consumeLateEntriesRescue, orderDatesForAttempt, filterExcludedDates, getMemberNames, type DirectApiResult } from './api-direct';
+import { setupApiResponseCapture, runDirectOfcFlow, resetCapturedScheduleData, getMemberQueryResult, resetMemberQueryResult, consumeLateEntriesRescue, orderDatesForAttempt, filterExcludedDates, getMemberNames, getEntriesTiming, type DirectApiResult } from './api-direct';
 import { recordDateExperiment } from './date-experiment'; // EXPERIMENTAL: avoidEarliestDate
 import { recordCitySelection } from './city-selection-log';
 import { playBeep } from './beep';
@@ -252,6 +252,7 @@ function logCitySelected(
     },
     apiScheduleDays: days.length,
     apiScheduleEntries: Array.isArray(scheduleResult?.scheduleEntries) ? scheduleResult.scheduleEntries.length : 0,
+    timing: getEntriesTiming(),
     apiAvailable: true,
     calendarMonth: null
   });
@@ -398,6 +399,20 @@ async function runConsularStageWithRecovery(
   for (;;) {
     if (checkStopSignal() || stopRequested) {
       await pauseForStop(page, config);
+      continue;
+    }
+
+    // AUTOMATE CONSULAR toggled off mid-sweep → park on the page (no
+    // actions); resume/booked/stop verdicts behave like the entry gate.
+    if (!isConsularAutomationEnabled(config)) {
+      const act = await pauseForConsularToggle(page, config);
+      if (act === 'booked') {
+        client('✅', 'CONSULAR BOOKED! Confirmation page reached.');
+        await sendConfirmationPdfToTelegram(page, config);
+        return true;
+      }
+      if (act === 'exit') return false;
+      if (act === 'stopped') await pauseForStop(page, config);
       continue;
     }
 
@@ -1068,6 +1083,109 @@ async function pauseForStop(page: Page, config: AutomationConfig): Promise<void>
   stopRequested = false;
 }
 
+// ---------------------------------------------------------------------------
+//  AUTOMATE CONSULAR toggle — per-profile flag the UI writes on profile save
+//  (.ivac-consular-auto-<id>, contents 'on'/'off'). Read live each check so
+//  toggling takes effect without a restart. Missing file → saved config;
+//  missing config key (old config.local.json) → ON.
+// ---------------------------------------------------------------------------
+
+const CONSULAR_AUTO_FLAG_FILE = path.resolve(process.cwd(), '.ivac-consular-auto-' + (process.env.IVAC_PROFILE_ID || 'default'));
+
+function isConsularAutomationEnabled(config: AutomationConfig): boolean {
+  try {
+    const raw = fs.readFileSync(CONSULAR_AUTO_FLAG_FILE, 'utf8').trim().toLowerCase();
+    if (raw === 'on') return true;
+    if (raw === 'off') return false;
+  } catch { /* no flag file → config default */ }
+  return config.consular?.automate !== false;
+}
+
+/**
+ * Consular-stage park — the page sits on the consular schedule page and the
+ * core takes NO actions (no city selects, no day queries) while AUTOMATE
+ * CONSULAR is off. Keeps watching passively like pauseAndListen so a manual
+ * consular booking is still detected and reported. Resume triggers: the
+ * flag flipping ON, or the UI Start signal (Start = manual override).
+ * 'booked' → caller runs the normal confirmation path; 'stopped' → UI Stop
+ * was pressed mid-park → caller routes into pauseForStop; 'exit' → page died.
+ */
+async function pauseForConsularToggle(page: Page, config: AutomationConfig): Promise<'resume' | 'stopped' | 'exit' | 'booked'> {
+  info('[STOPPED] Paused — consular automation off (toggle AUTOMATE CONSULAR to run).');
+  uiStatus('Paused — consular automation off');
+  client('⏸️', 'Consular automation OFF — parked on consular page (enable AUTOMATE CONSULAR to sweep)');
+
+  let consularReported = false;
+  const report = (type: string, url: string, extra?: Record<string, any>) => {
+    sendSupabaseEvent(type, { username: config.username, source: 'listener', url, ...(extra || {}) }).catch(() => false);
+  };
+  const onResponse = (res: { url(): string }) => {
+    try {
+      if (res.url().includes('schedule-consular-appointments-for-family')) {
+        report('submit_clicked', res.url(), { stage: 'consular' });
+        info('[LISTEN] Observed consular submit → submit_clicked event sent.');
+      }
+    } catch { /* ignore */ }
+  };
+  page.on('response', onResponse);
+
+  try {
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 2500));
+      if (checkStopSignal()) return 'stopped';
+      if (isConsularAutomationEnabled(config)) {
+        info('[RESUMED] Consular automation enabled — resuming consular sweep.');
+        client('▶️', 'Consular automation ON — sweeping');
+        return 'resume';
+      }
+      if (checkStartSignal()) {
+        info('[RESUMED] Start signal received — resuming automation.');
+        client('▶️', 'Resumed');
+        return 'resume';
+      }
+      // Liveness probe — page.url() is a local cache that survives browser
+      // death, so probe the target itself (read-only eval, no page action).
+      await page.evaluate(() => 1);
+      const url = page.url();
+      if (!consularReported && url.includes('appointment-confirmation')) {
+        consularReported = true;
+        report('consular_submitted', url);
+        info('[LISTEN] Page reached appointment-confirmation → consular_submitted event sent.');
+        return 'booked';
+      }
+    }
+  } catch {
+    info('Page/browser closed while consular-parked — exiting.');
+    return 'exit';
+  } finally {
+    try { page.off('response', onResponse); } catch { /* ignore */ }
+  }
+}
+
+/**
+ * Consular-stage entry gate. When AUTOMATE CONSULAR is off the core parks on
+ * the consular page (no actions) instead of sweeping — notifications/video
+ * already fired upstream. On 'booked' the normal confirmation path runs;
+ * 'stopped' drops into the standard pauseAndListen; 'resume' re-checks the
+ * flag so a bare Start while still OFF parks again instead of sweeping.
+ */
+async function runConsularStage(page: Page, config: AutomationConfig, runId: string, attempt: number): Promise<boolean> {
+  for (;;) {
+    if (isConsularAutomationEnabled(config)) {
+      return await runConsularStageWithRecovery(page, config, runId, attempt);
+    }
+    const act = await pauseForConsularToggle(page, config);
+    if (act === 'booked') {
+      client('✅', 'CONSULAR BOOKED! Confirmation page reached.');
+      await sendConfirmationPdfToTelegram(page, config);
+      return true;
+    }
+    if (act === 'exit') return false;
+    if (act === 'stopped') await pauseForStop(page, config);
+    // 'resume' → loop re-checks the flag; still OFF → parks again.
+  }
+}
+
 /**
  * Jittered 5-10s pause before a home→schedule recovery navigation. Rapid
  * home↔schedule ping-pong is itself a Cloudflare attention trigger — the
@@ -1358,6 +1476,36 @@ async function isPrivacyActPage(page: any) {
   return pageHasSelector(page, '#privacy-act-visual');
 }
 
+// "Login not allowed for your account at this moment. Your account may have
+// been temporarily blocked due to prohibited use of automation" — server-side
+// account lockout rendered inside #claimVerificationServerError (verified
+// live) while the sign-in form still renders. Must classify BEFORE 'login' —
+// otherwise the resume loop keeps re-submitting credentials into the lock.
+async function isAccountBlockedPage(page: any): Promise<boolean> {
+  const bodyText = await page.locator('body').innerText().catch(() => '');
+  return /not allowed for your account|may have been temporarily blocked|temporarily blocked due to|prohibited use of automation/i.test(bodyText);
+}
+
+// One-notify-per-block-episode dedup: the marker timestamp gates the Telegram
+// alert; a healthy page state clears it so a FUTURE block re-notifies.
+const BLOCKED_FLAG_FILE = path.resolve(process.cwd(), '.ivac-blocked-' + (process.env.IVAC_PROFILE_ID || 'default'));
+
+function blockedNotificationPending(): boolean {
+  try {
+    return !(fs.existsSync(BLOCKED_FLAG_FILE) && Date.now() - fs.statSync(BLOCKED_FLAG_FILE).mtimeMs < 48 * 3600_000);
+  } catch {
+    return true;
+  }
+}
+
+function markAccountBlocked(): void {
+  try { fs.writeFileSync(BLOCKED_FLAG_FILE, new Date().toISOString()); } catch { /* non-fatal */ }
+}
+
+function clearAccountBlockedMarker(): void {
+  try { if (fs.existsSync(BLOCKED_FLAG_FILE)) fs.unlinkSync(BLOCKED_FLAG_FILE); } catch { /* non-fatal */ }
+}
+
 async function isOfcSchedulePage(page: any) {
   return (
     urlIsOfcSchedule(page.url()) &&
@@ -1562,7 +1710,7 @@ async function isRelevantSite(page: any) {
 // =============================================================================
 
 type ResumePageState =
-  | 'internal' | 'irrelevant' | 'hard_block' | 'login_failed' | 'login'
+  | 'internal' | 'irrelevant' | 'hard_block' | 'login_failed' | 'login_blocked' | 'login'
   | 'privacy' | 'security' | 'home' | 'cloudflare'
   | 'ofc' | 'consular' | 'suppressed' | 'unknown' | 'browser_closed';
 
@@ -1613,9 +1761,10 @@ async function detectPageState(page: any): Promise<DetectedPageState> {
 
   // App-page checks run in parallel (independent read-only DOM queries) but are
   // prioritized in the if-chain below.
-  const [loginFailed, privacy, security, loginPage, home, verification, ofc, consular] =
+  const [loginFailed, accountBlocked, privacy, security, loginPage, home, verification, ofc, consular] =
     await Promise.all([
       isLoginFailedPage(page).catch(() => false),
+      isAccountBlockedPage(page).catch(() => false),
       isPrivacyActPage(page).catch(() => false),
       isSecurityQuestionPage(page).catch(() => false),
       isLoginPage(page).catch(() => false),
@@ -1626,6 +1775,7 @@ async function detectPageState(page: any): Promise<DetectedPageState> {
     ]);
 
   if (loginFailed) return { state: 'login_failed', ...none };
+  if (accountBlocked) return { state: 'login_blocked', ...none };
   if (privacy) return { state: 'privacy', ...none };
   if (security) return { state: 'security', ...none };
   if (loginPage) return { state: 'login', ...none };
@@ -1683,6 +1833,12 @@ async function resumeFromCurrentPage(
     info(`Resume check [${attempt}/${maxAttempts}]: state=${detected.state} url=${currentUrl} title=${currentTitle}`);
     if (attempt % 8 === 0) uiStatus(`Recovering page state (${attempt}/${maxAttempts})`);
 
+    // A healthy page means the account is usable again — clear the
+    // block-notified marker so a future block alerts afresh.
+    if (detected.state === 'ofc' || detected.state === 'consular' || detected.state === 'home' || detected.state === 'suppressed') {
+      clearAccountBlockedMarker();
+    }
+
     switch (detected.state) {
       case 'internal': {
         if (!allowNavigation) {
@@ -1726,6 +1882,28 @@ async function resumeFromCurrentPage(
         uiStatus('Recovering — login failed, restarting sign-in');
         await page.goto(config.authUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => null);
         continue;
+      }
+
+      case 'login_blocked': {
+        // Server-side account lockout ("Login not allowed for your account at
+        // this moment… temporarily blocked"). Every sign-in attempt into an
+        // active block risks extending it — the only correct response is to
+        // stop automation entirely and alert the operator once per episode.
+        warn(`[LOGIN_BLOCKED] Account temporarily blocked (${currentUrl}). Stopping automation — no further sign-in attempts.`);
+        client('⛔', 'Account temporarily blocked by the site — stopping automation. Do not retry login; contact support to unblock.');
+        uiStatus('Account blocked — stopped');
+        if (blockedNotificationPending()) {
+          markAccountBlocked();
+          sendAccountBlockedNotification(config.username).catch(() => null);
+          sendSupabaseEvent('account_blocked', {
+            username: config.username,
+            url: currentUrl
+          }).catch(() => null);
+        } else {
+          info('[LOGIN_BLOCKED] Block already notified within 48h — stopping without re-alerting.');
+        }
+        client('🛑', 'Script stopped');
+        process.exit(0);
       }
 
       case 'login': {
@@ -2089,7 +2267,7 @@ async function main() {
           openNotificationVideo(page);
           notificationVideoOpened = true;
         }
-        const consularOk = await runConsularStageWithRecovery(page, config, runId, attempt);
+        const consularOk = await runConsularStage(page, config, runId, attempt);
         if (consularOk) {
           booked = true;
           saveCheckpoint({
@@ -2788,7 +2966,7 @@ async function main() {
         // Run consular stage with continuous monitoring and 403 recovery.
         // This does NOT return false on failure — it keeps trying until
         // consular is booked or the stop signal is detected.
-        const consularOk = await runConsularStageWithRecovery(page, config, runId, attempt);
+        const consularOk = await runConsularStage(page, config, runId, attempt);
         if (consularOk) {
           // Full success (OFC + consular both submitted)
           booked = true;
@@ -3194,8 +3372,8 @@ async function main() {
           config.appointment.endDate,
           []
         );
-        // EXPERIMENTAL: avoidEarliestDate — same 2nd-first reorder as the
-        // fast flow so DOM fallback doesn't silently switch strategy.
+        // EXPERIMENTAL: avoidEarliestDate — skip earliest, same as the fast
+        // flow so DOM fallback doesn't silently switch strategy.
         const usableDates = filterExcludedDates(inRange, c => c.date, config);
         candidateDates = orderDatesForAttempt(usableDates, c => c.date, config.avoidEarliestDate,
           { path: 'dom', profile: config.username, city: currentCity, runId, attempt });
@@ -3262,7 +3440,7 @@ async function main() {
                 config.appointment.endDate,
                 []
               );
-              // EXPERIMENTAL: avoidEarliestDate — same reorder as fast flow.
+              // EXPERIMENTAL: avoidEarliestDate — skip earliest, same as fast flow.
               const tryUsableDates = filterExcludedDates(inRange, c => c.date, config);
               candidateDates = orderDatesForAttempt(tryUsableDates, c => c.date, config.avoidEarliestDate,
                 { path: 'dom', profile: config.username, city: tryCity, runId, attempt });
@@ -3558,7 +3736,7 @@ async function main() {
             notificationVideoOpened = true;
           }
 
-          const consularOk = await runConsularStageWithRecovery(page, config, runId, attempt);
+          const consularOk = await runConsularStage(page, config, runId, attempt);
           if (!consularOk) {
             warn('Consular stage did not complete (stop signal or browser closed); aborting date/time loop');
             hardStop = true;

@@ -48,6 +48,10 @@ const SPECIAL_WINDOW_FLAG_FILE = path.join(PROJECT_ROOT, '.ivac-special-window')
 // core to advance its proxy round-robin (each checks the file mtime per loop).
 const STATIC_ROTATE_FLAG_FILE = path.join(PROJECT_ROOT, '.ivac-rotate-static');
 const STATIC_LAST_IP_FILE = path.join(PROJECT_ROOT, '.ivac-static-last-ip');
+// Per-profile AUTOMATE CONSULAR flag — running cores read 'on'/'off' each
+// loop so toggling it in the profile editor takes effect without a restart.
+// Missing file = fall back to the saved config value (default ON).
+const CONSULAR_AUTO_FLAG_BASE = path.join(PROJECT_ROOT, '.ivac-consular-auto');
 const MAX_LOG_SIZE = 500_000;
 
 // NordVPN rotation lives in ui/nordvpn-rotate.js — a CommonJS port of
@@ -919,6 +923,7 @@ const apiServer = http.createServer(async (req, res) => {
       cfg.profiles.push(newProfile);
       console.log('[main] adding profile', newProfile.username, 'new count:', cfg.profiles.length);
       writeConfig(cfg);
+      try { fs.writeFileSync(CONSULAR_AUTO_FLAG_BASE + '-' + newProfile.id, (newProfile.consular && newProfile.consular.automate === false) ? 'off' : 'on'); } catch {}
       console.log('[main] saved config for', newProfile.username, 'profiles now:', cfg.profiles.length);
       return jsonResponse(res, { ok: true, profile: newProfile });
     }
@@ -943,6 +948,7 @@ const apiServer = http.createServer(async (req, res) => {
       cfg.profiles[idx] = { ...cfg.profiles[idx], ...body.profile };
       console.log('[main] updating profile', body.profile.username, 'count:', cfg.profiles.length);
       writeConfig(cfg);
+      try { fs.writeFileSync(CONSULAR_AUTO_FLAG_BASE + '-' + cfg.profiles[idx].id, (cfg.profiles[idx].consular && cfg.profiles[idx].consular.automate === false) ? 'off' : 'on'); } catch {}
       return jsonResponse(res, { ok: true });
     }
 

@@ -44,6 +44,9 @@ export type ConsularConfig = {
   startDate: string;
   endDate: string;
   cityRetrySeconds: number;
+  // AUTOMATE CONSULAR toggle (edit-profile checkbox). Absent in old configs —
+  // treated as ON so existing profiles keep sweeping.
+  automate?: boolean;
 };
 
 export type AutomationConfig = {
@@ -399,7 +402,9 @@ function mergeWithDefaults(settings: Partial<SettingsConfig>, profile: ProfileCo
     startDate: (profile.consular?.startDate ?? env.CONSULAR_START_DATE ?? '').trim(),
     endDate: (profile.consular?.endDate ?? env.CONSULAR_END_DATE ?? '').trim(),
     cityRetrySeconds:
-      parseNumber(profile.consular?.cityRetrySeconds ?? settings.consularCityRetrySeconds ?? env.CONSULAR_CITY_RETRY_SECONDS, 15)
+      parseNumber(profile.consular?.cityRetrySeconds ?? settings.consularCityRetrySeconds ?? env.CONSULAR_CITY_RETRY_SECONDS, 15),
+    // Default ON — old config.local.json files have no automate key.
+    automate: profile.consular?.automate !== false
   };
 
   const securityQuestions = Array.isArray(profile.securityQuestions)

@@ -138,6 +138,9 @@
         <input id="pCityRetrySeconds" type="number" min="1" value="30" />
 
         <h3>Consular (optional)</h3>
+        <label class="toggle-line"><input id="pAutomateConsular" type="checkbox" checked /> <b>AUTOMATE CONSULAR</b></label>
+        <small class="hint">OFF = after OFC booking the script parks on the consular page (no actions, keeps watching). Telegram + confirmation still fire.</small>
+        <div id="consularFields">
         <label>Consular Cities <small>(empty = same as OFC)</small></label>
         <div class="consular-city-checks">
           <label><input type="checkbox" value="NEW DELHI" /> NEW DELHI</label>
@@ -161,6 +164,7 @@
 
         <label>Consular City Retry Timer (seconds)</label>
         <input id="pConsularCityRetry" type="number" min="1" value="15" />
+        </div>
 
         <div class="row two-cols">
           <div>

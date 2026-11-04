@@ -46,6 +46,8 @@ export type SlotObservation = {
   apiScheduleDays: number;
   /** Count of schedule entries from the schedule API response (0 if no API response) */
   apiScheduleEntries: number;
+  /** ms timestamps of the days→entries request chain for drop-race forensics */
+  timing?: { daysRequestAt: number; daysResponseAt: number; entriesRequestAt: number; entriesResponseAt: number };
   /** Whether the schedule API reported availability (null if no API response) */
   apiAvailable: boolean | null;
   /** Best-effort calendar month label (e.g. "October 2026"); null if not extracted */

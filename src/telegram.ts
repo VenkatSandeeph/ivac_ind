@@ -198,6 +198,29 @@ export async function sendOfcBookedNotification(data: OfcBookedNotification): Pr
   return sendTelegramMessage(message);
 }
 
+/**
+ * Format and send an account-blocked alert — fired when the site's own
+ * "Login not allowed for your account at this moment / temporarily blocked
+ * due to prohibited use of automation" message is detected on the sign-in
+ * page. Fire-and-forget like the other senders; caller dedups.
+ */
+export async function sendAccountBlockedNotification(username: string): Promise<boolean> {
+  const timestamp = istTimestamp();
+  const message = [
+    '<b>⛔ ACCOUNT BLOCKED</b>',
+    '',
+    `<b>👤 Client User:</b> ${escapeHtml(username)}`,
+    '<b>🚫 Reason:</b> Login not allowed — temporarily blocked (prohibited use of automation)',
+    `<b>🕐 Detected At:</b> ${timestamp}`,
+    '',
+    '<b>Action needed:</b>',
+    '• Do NOT retry login — attempts may extend the block',
+    '• Email support-india@usvisascheduling.com to request unblock'
+  ].join('\n');
+
+  return sendTelegramMessage(message);
+}
+
 /** Escape HTML special characters for Telegram HTML parse mode. */
 function escapeHtml(text: string): string {
   return text

@@ -122,6 +122,11 @@ let entriesRequestResolve: (() => void) | null = null;
 // server load used to scale the entries wait budget.
 let daysRequestAt = 0;
 let lastDaysLatencyMs = 0;
+// ms timestamps for drop-race forensics: days response → entries request →
+// entries response. Exported via getEntriesTiming() for slot-observation logs.
+let daysResponseAt = 0;
+let entriesRequestAt = 0;
+let entriesResponseAt = 0;
 // Late-entries rescue: armed when Phase 2 times out with the entries request
 // still in flight. Consumed during the inter-city wait — never after the
 // next city selection (the context is per-city and dies there).
@@ -257,6 +262,7 @@ export function setupApiResponseCapture(page: Page): void {
       }
       if (url.includes('get-family-ofc-schedule-entries')) {
         entriesRequestGen++;
+        entriesRequestAt = Date.now();
         if (entriesRequestResolve) {
           entriesRequestResolve();
           entriesRequestResolve = null;
@@ -382,7 +388,8 @@ export function setupApiResponseCapture(page: Page): void {
       // Capture schedule days + token from getScheduleDays
       if (url.includes('get-family-ofc-schedule-days')) {
         if (daysRequestAt) {
-          lastDaysLatencyMs = Date.now() - daysRequestAt;
+          daysResponseAt = Date.now();
+          lastDaysLatencyMs = daysResponseAt - daysRequestAt;
           daysRequestAt = 0;
         }
         let data = await response.json().catch(() => null);
@@ -423,6 +430,7 @@ export function setupApiResponseCapture(page: Page): void {
             EntriesAvailable: Number(e.EntriesAvailable ?? e.Available ?? e.Capacity ?? 0)
           }));
           capturedScheduleEntries = entries;
+          entriesResponseAt = Date.now();
           capturedEntriesToken = String(data.Token || '');
           entriesCaptureGen++;
           info(`[FAST FLOW] Captured ${entries.length} schedule entry(ies) + token (len=${capturedEntriesToken.length}) from getScheduleEntries`);
@@ -465,6 +473,10 @@ export function setupApiResponseCapture(page: Page): void {
  * Resets captured schedule data — call before each city selection
  * so we don't reuse stale data from a previous city.
  */
+export function getEntriesTiming(): { daysRequestAt: number; daysResponseAt: number; entriesRequestAt: number; entriesResponseAt: number } {
+  return { daysRequestAt, daysResponseAt, entriesRequestAt, entriesResponseAt };
+}
+
 export function resetCapturedScheduleData(): void {
   capturedScheduleDays = null;
   capturedScheduleToken = null;
@@ -473,6 +485,7 @@ export function resetCapturedScheduleData(): void {
   // A pending late-entries rescue dies with the city context — the next
   // selectCity switches postId/token chain, making the capture unusable.
   lateEntriesRescue = null;
+  daysRequestAt = 0; daysResponseAt = 0; entriesRequestAt = 0; entriesResponseAt = 0;
 }
 
 // =============================================================================
@@ -779,50 +792,51 @@ function sortScheduleEntries(entries: ScheduleEntry[], preferredTime?: string | 
 }
 
 // =============================================================================
-// EXPERIMENTAL: avoidEarliestDate — 2nd-date-first ordering
+// EXPERIMENTAL: avoidEarliestDate — skip the earliest date ("2nd Date" toggle)
 // -----------------------------------------------------------------------------
 // Theory: bots/humans concentrate on the earliest available date, so the
-// 2nd-earliest date sees less submit contention. When ≥2 in-range dates exist
-// and the 2nd is within AVOID_EARLIEST_WINDOW_DAYS working days of the
-// earliest, try the 2nd FIRST while keeping the earliest as the immediate
-// fallback in the same attempt (reorder, never skip — a failed 2nd date still
-// falls through to the earliest before the next city).
+// 2nd-earliest date sees less submit contention. When ≥2 in-range dates
+// exist, the earliest is SKIPPED entirely for this attempt — attempt order
+// becomes [2nd, 3rd, 4th, ...] with no same-attempt fallback and no gap
+// window (any in-range 2nd date qualifies). The earliest re-enters candidacy
+// on the next sweep, when the days response lists it again.
 // To remove: delete this block, the orderDatesForAttempt call sites, and the
 // avoidEarliestDate plumbing (config.ts, ui/, config.example.json).
 // =============================================================================
 
-const AVOID_EARLIEST_WINDOW_DAYS = 7;
-
 /**
  * Count Mon–Fri days strictly after `a` up to and including `b`.
  * Dates are ISO 'YYYY-MM-DD' (compared lexically before parsing).
+ * Logging-only: reported as gapWorkingDays in decision events.
  */
 function workingDaysBetween(a: string, b: string): number {
   if (b <= a) return 0;
   const start = new Date(a + 'T00:00:00');
   const end = new Date(b + 'T00:00:00');
   if (isNaN(start.getTime()) || isNaN(end.getTime())) return 0;
-  // Simple loop — only small gaps matter (early exit past the window).
+  // Simple loop — early exit past ~1 year keeps pathological ranges cheap.
   let count = 0;
   const cursor = new Date(start);
   while (cursor < end) {
     cursor.setDate(cursor.getDate() + 1);
     const dow = cursor.getDay(); // 0=Sun .. 6=Sat
     if (dow >= 1 && dow <= 5) count++;
-    if (count > AVOID_EARLIEST_WINDOW_DAYS) break;
+    if (count > 370) break;
   }
   return count;
 }
 
 /**
- * Attempt order for candidate dates. When enabled and the 2nd date is within
- * the working-day window of the earliest, returns [2nd, 1st, 3rd, ...] —
- * the earliest remains the immediate fallback in the same attempt.
- * Otherwise returns the input unchanged.
+ * Attempt order for candidate dates. When enabled and ≥2 in-range dates
+ * exist, returns items.slice(1) — [2nd, 3rd, ...]; the earliest is skipped
+ * entirely this attempt (no fallback, any gap). Otherwise returns the input
+ * unchanged.
  *
  * `meta` (optional): caller context written to logs/date-experiment.jsonl.
  * A decision event is recorded whenever meta is provided — including when
- * the flag is off (wouldReorder = baseline "would have fired" data).
+ * the flag is off (wouldReorder = "would have skipped" baseline data).
+ * Field names kept for schema stability: wouldReorder = "≥2 dates exist",
+ * reordered = "rule fired", order = resulting attempt order.
  */
 export function orderDatesForAttempt<T>(
   items: T[],
@@ -833,8 +847,8 @@ export function orderDatesForAttempt<T>(
   const gap = items.length >= 2
     ? workingDaysBetween(dateOf(items[0]), dateOf(items[1]))
     : 0;
-  const wouldReorder = gap > 0 && gap <= AVOID_EARLIEST_WINDOW_DAYS;
-  const reordered = enabled && wouldReorder;
+  const wouldSkip = items.length >= 2;
+  const skipped = enabled && wouldSkip;
   if (meta) {
     recordDateExperiment({
       type: 'decision',
@@ -843,16 +857,16 @@ export function orderDatesForAttempt<T>(
       nDates: items.length,
       dates: items.slice(0, 6).map(dateOf),
       gapWorkingDays: gap,
-      wouldReorder,
-      reordered,
-      order: reordered
-        ? [dateOf(items[1]), dateOf(items[0]), ...items.slice(2, 6).map(dateOf)]
+      wouldReorder: wouldSkip,
+      reordered: skipped,
+      order: skipped
+        ? items.slice(1, 6).map(dateOf)
         : items.slice(0, 6).map(dateOf)
     });
   }
-  if (!reordered) return items;
-  info(`[EXPERIMENTAL] avoidEarliestDate: 2nd date ${dateOf(items[1])} is ${gap} working day(s) after ${dateOf(items[0])} — trying it first (earliest remains fallback)`);
-  return [items[1], items[0], ...items.slice(2)];
+  if (!skipped) return items;
+  info(`[EXPERIMENTAL] avoidEarliestDate: skipping earliest ${dateOf(items[0])} — 2nd date ${dateOf(items[1])} goes first (earliest excluded this attempt)`);
+  return items.slice(1);
 }
 
 // =============================================================================

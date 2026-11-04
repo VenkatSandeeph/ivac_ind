@@ -1,0 +1,78 @@
+{
+ "stage1": {
+  "url": "https://atlasauth.b2clogin.com/atlasauth.onmicrosoft.com/oauth2/v2.0/authorize?p=B2C_1A_ATLAS_PASSWORDRESET&client_id=607d08d6-b63b-4735-ad8",
+  "title": "User details - Self Asserted",
+  "fields": [
+   {
+    "id": "signInName",
+    "type": "text",
+    "name": ""
+   },
+   {
+    "id": "email",
+    "type": "text",
+    "name": ""
+   },
+   {
+    "id": "email_ver_input",
+    "type": "text",
+    "name": ""
+   }
+  ],
+  "buttons": [
+   "What is this?",
+   "What is this?",
+   "Send Verification Code",
+   "Verify Code",
+   "Send New Code",
+   "Change e-mail",
+   "Default",
+   "Continue",
+   "Cancel"
+  ],
+  "serverErr": null,
+  "pageErr": "A required field is missing. Please fill out all required fields and try again.",
+  "bodyText": "User Details\nUsername*\nVerification is necessary. Please click Send Verification Code button.\nEmail Address*\nSend Verification Code\nContinueCancel"
+ },
+ "filledField": {
+  "id": "signInName",
+  "type": "text",
+  "name": ""
+ },
+ "stage2": {
+  "url": "https://atlasauth.b2clogin.com/atlasauth.onmicrosoft.com/oauth2/v2.0/authorize?p=B2C_1A_ATLAS_PASSWORDRESET&client_id=607d08d6-b63b-4735-ad8",
+  "title": "User details - Self Asserted",
+  "fields": [
+   {
+    "id": "signInName",
+    "type": "text",
+    "name": ""
+   },
+   {
+    "id": "email",
+    "type": "text",
+    "name": ""
+   },
+   {
+    "id": "email_ver_input",
+    "type": "text",
+    "name": ""
+   }
+  ],
+  "buttons": [
+   "What is this?",
+   "What is this?",
+   "Send Verification Code",
+   "Verify Code",
+   "Send New Code",
+   "Change e-mail",
+   "Default",
+   "Continue",
+   "Cancel"
+  ],
+  "serverErr": null,
+  "pageErr": "A required field is missing. Please fill out all required fields and try again.",
+  "blockMsg": false,
+  "bodyText": "User Details\nUsername*\nVerification is necessary. Please click Send Verification Code button.\nEmail Address*\nEmail Address is required.\nSend Verification Code\nContinueCancel"
+ }
+}

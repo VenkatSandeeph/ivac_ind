@@ -1,0 +1,184 @@
+{
+ "requests": [
+  {
+   "url": "https://atlasauth.b2clogin.com/f50ebcfb-eadd-41d8-9099-a7049d073f5c/B2C_1A_atoproduction_Atlas_SUSI/client/perftrace?tx=StateProperties=eyJUSUQiOiI4ZGMzZDY0NC1iMDNiLTQzNGItYmY1YS0wNDU1NDQwNWIwNzgifQ&p",
+   "postData": "{\"navigation\":{\"type\":0,\"redirectCount\":0},\"timing\":{\"connectStart\":1793630042897,\"secureConnectionStart\":1793630043172,\"unloadEventEnd\":0,\"domainLookupStart\":1793630042631,\"domainLookupEnd\":1793630042896,\"responseStart\":1793630051795,\"connectEnd\":1793630049965,\"responseEnd\":1793630053917,\"requestStart\":1793630049965,\"domLoading\":1793630051836,\"redirectStart\":0,\"loadEventEnd\":1793630053970,\"domComplete\":1793630053970,\"navigationStart\":1793630040571,\"loadEventStart\":1793630053970,\"domContentLoadedEventEnd\":1793630053970,\"unloadEventStart\":0,\"redirectEnd\":0,\"domInteractive\":1793630053969,\"fetchS"
+  },
+  {
+   "url": "https://atlasauth.b2clogin.com/f50ebcfb-eadd-41d8-9099-a7049d073f5c/B2C_1A_atoproduction_Atlas_SUSI/SelfAsserted?tx=StateProperties=eyJUSUQiOiI4ZGMzZDY0NC1iMDNiLTQzNGItYmY1YS0wNDU1NDQwNWIwNzgifQ&p=B2C",
+   "postData": "signInName=anusree12&password=Anusree135!!&request_type=RESPONSE"
+  }
+ ],
+ "responses": [
+  {
+   "status": 403,
+   "url": "https://www.usvisascheduling.com/en-US/",
+   "headers": {
+    "accept-ch": "Sec-CH-UA-Bitness, Sec-CH-UA-Arch, Sec-CH-UA-Full-Version, Sec-CH-UA-Mobile, Sec-CH-UA-Model, Sec-CH-UA-Platform-Version, Sec-CH-UA-Full-Version-List, Sec-CH-UA-Platform, Sec-CH-UA, UA-Bitness, UA-Arch, UA-Full-Version, UA-Mobile, UA-Model, UA-Platform-Version, UA-Platform, UA",
+    "alt-svc": "h3=\":443\"; ma=86400",
+    "cf-mitigated": "challenge",
+    "cf-ray": "a543db2ed9042aad-LAX",
+    "content-encoding": "br",
+    "content-security-policy": "default-src 'none'; script-src 'nonce-eQHjZ1FXPtHsmJuMpuFsi7' 'unsafe-eval' https://challenges.cloudflare.com; script-src-attr 'none'; style-src 'unsafe-inline'; img-src 'self' https://challenges.cloudflare.com; connect-src 'self' https://challenges.cloudflare.com; frame-src 'self' https://challenges.cloudflare.com blob:; child-src 'self' https://challenges.cloudflare.com blob:; worker-src blob:; form-action http: https:; base-uri 'self'",
+    "content-type": "text/html; charset=UTF-8",
+    "critical-ch": "Sec-CH-UA-Bitness, Sec-CH-UA-Arch, Sec-CH-UA-Full-Version, Sec-CH-UA-Mobile, Sec-CH-UA-Model, Sec-CH-UA-Platform-Version, Sec-CH-UA-Full-Version-List, Sec-CH-UA-Platform, Sec-CH-UA, UA-Bitness, UA-Arch, UA-Full-Version, UA-Mobile, UA-Model, UA-Platform-Version, UA-Platform, UA",
+    "cross-origin-embedder-policy": "require-corp",
+    "cross-origin-opener-policy": "same-origin",
+    "cross-origin-resource-policy": "same-origin",
+    "date": "Mon, 02 Nov 2026 14:33:46 GMT",
+    "origin-agent-cluster": "?1",
+    "permissions-policy": "accelerometer=(),camera=(),clipboard-read=(),clipboard-write=(),geolocation=(),gyroscope=(),hid=(),magnetometer=(),microphone=(),payment=(),publickey-credentials-get=(),screen-wake-lock=(),serial=(),sync-xhr=(),usb=(),xr-spatial-tracking=*",
+    "referrer-policy": "same-origin",
+    "server": "cloudflare",
+    "server-timing": "chlray;desc=\"a543db2ed9042aad\"",
+    "speculation-rules": "\"/cdn-cgi/speculation\"",
+    "strict-transport-security": "max-age=15552000; includeSubDomains; preload",
+    "vary": "accept-encoding",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "SAMEORIGIN"
+   }
+  },
+  {
+   "status": 200,
+   "url": "https://www.usvisascheduling.com/cdn-cgi/speculation",
+   "headers": {
+    "strict-transport-security": "max-age=15552000; includeSubDomains; preload",
+    "speculation-rules": "\"/cdn-cgi/speculation\"",
+    "x-content-type-options": "nosniff",
+    "cf-ray": "a543db31ecb52aad-LAX",
+    "access-control-allow-origin": "https://www.usvisascheduling.com",
+    "content-length": "151",
+    "date": "Mon, 02 Nov 2026 14:33:46 GMT",
+    "content-type": "application/speculationrules+json",
+    "vary": "Origin",
+    "server": "cloudflare"
+   }
+  },
+  {
+   "status": 200,
+   "url": "https://www.usvisascheduling.com/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1?ray=a543db2ed9042aad",
+   "headers": {
+    "cf-ray": "a543db31ecba2aad-LAX",
+    "cache-control": "private, max-age=0, no-store, no-cache, must-revalidate, post-check=0, pre-check=0",
+    "alt-svc": "h3=\":443\"; ma=86400",
+    "content-encoding": "br",
+    "date": "Mon, 02 Nov 2026 14:33:46 GMT",
+    "content-type": "application/javascript; charset=UTF-8",
+    "server": "cloudflare"
+   }
+  },
+  {
+   "status": 200,
+   "url": "https://www.usvisascheduling.com/cdn-cgi/challenge-platform/h/b/fo/2215709488:1793628616:EyTmoK6Mu3znzGmFhptmqonU2QP7HWgABsZxfNknz0Y/a543db2ed9042aad/bPje3umYXLv5PcqfqtBAiU3nsQz9vr",
+   "headers": {
+    "timing-allow-origin": "https://www.usvisascheduling.com",
+    "content-encoding": "br",
+    "cf-ray": "a543db4b2db12aad-LAX",
+    "alt-svc": "h3=\":443\"; ma=86400",
+    "date": "Mon, 02 Nov 2026 14:33:50 GMT",
+    "content-type": "text/plain; charset=UTF-8",
+    "cf-chl-gen": "ZmqC1VJpInacj7GdkGUdhrTP6JDnm82gM2OWgU0dHfs=$AjWZ3iYJ5BTjgtm1Zv7uwA==",
+    "server": "cloudflare"
+   }
+  },
+  {
+   "status": 200,
+   "url": "https://www.usvisascheduling.com/cdn-cgi/challenge-platform/h/b/fo/2215709488:1793628616:EyTmoK6Mu3znzGmFhptmqonU2QP7HWgABsZxfNknz0Y/a543db2ed9042aad/bPje3umYXLv5PcqfqtBAiU3nsQz9vr",
+   "headers": {
+    "cf-chl-out": "daTRPTooOAzgOiDFIuZxoZNXbJQMA+h6PZLFW8ySnG+0V/Zmqta35ufsNSwy8bHEQMFOxD/jIKEZqCCWvgj9aQUISBDj042lm6EBrkjJGdE1nZdNxOWLoKRPFw3xQUY9O7PqVrIQH98ZoOMRjYGDzA==$qOEy+iQo/MPsIYSacSv8bA==",
+    "timing-allow-origin": "https://www.usvisascheduling.com",
+    "content-encoding": "br",
+    "cf-ray": "a543db907f792aad-LAX",
+    "alt-svc": "h3=\":443\"; ma=86400",
+    "cf-chl-out-s": "HsadpzU6lWebeRRs/uEAMUi35KJOGEZTGOT+ju8f3tuZ4ncUfnxqSKONGKwlSl0cR1rRbyJWjTgt/Y4Cl9EAF+IGu3IdBqVypxuLByNN6AAx1cIEwL87jZupxaBPflmX5Wb3XmVhwYElfxekRiamazFIR+U+MSLznJniVycytv9rEIGIS+bnhabWLKo+93lv4boqvXOwXf6dOMN8ccsaPYbRjb+cSbWuv+UkrGOYarTeAF1zp5zUtPz84Qs/mAzAUV3AE5yln1uGWsAf9CnVpgsFN+DkFuJvVWhEUrgI3HRYi95tqwjpmymWJ/IGFi/qhLAJEoTpqj8lMil266s2EEIdJSUsxXllNTP2FN4+htZdcdVoXWguXn5HC9sNrsd2Fr7+3JJrLRd67Dc7P5S3+mqqAyUqkQ5njEuNJ6Fz2iaT/n6ghrBlufaiWYWmg9Pwalqbn9EdcRyihmxDeqocP+bUo1GYNP851CjkpvkmeJmS7P+tC7uRfhpJ8MXBJPXHYLpoauEc4Bov5VvDZEv+udA4jNnPI/RmoTvUJW1WBSVQZJUEWZXFnDc3Hkf2E8ur9iIGCLHJB/1iV/wG7JTyJ8nInx+QFZKjkYKIOXVU4VXZy4494DvnjlDKQFc4Gbz4HfgMcdMlu2NDrSq0BhnSAjWktw/+w1Yigz85djZAxKPeTWcdu6A5Mkq6xB/A/X0fitQhEmE58jU1QY7/EGp4Yw9PiiYWx+mMxa2sNir6LnRDlDipRza+JzU4NjHzX4UvlUNr52LGuM0/Jv4/mwatpoLXu1mfBGW24dJH4hCfAMbMdekQb4ljzw5njksn1bKIgbn+VkkdEb0gjGbDTNOySYok/wLmInfyJK2fgpuZoBgMPrrCDvo92OU87dRTc6gtcrNhn5iMyRm0TjODGLCd4lrukGP9qCupBtHIoX6Yp/g=$w2KINSdxjZdz45kq30w+oQ==",
+    "date": "Mon, 02 Nov 2026 14:34:01 GMT",
+    "content-type": "text/html; charset=UTF-8",
+    "server": "cloudflare"
+   }
+  },
+  {
+   "status": 200,
+   "url": "https://atlasauth.b2clogin.com/f50ebcfb-eadd-41d8-9099-a7049d073f5c/b2c_1a_atoproduction_atlas_susi/oauth2/v2.0/authorize?client_id=607d08d6-b63b-4735-ad82-05dfcff7efa4&redirect_ur",
+   "headers": {
+    "Allow": "OPTIONS\nTRACE\nGET\nHEAD\nPOST",
+    "Cache-Control": "no-store, must-revalidate, no-cache",
+    "Content-Encoding": "gzip",
+    "Content-Length": "88285",
+    "Content-Type": "text/html; charset=utf-8",
+    "Date": "Mon, 02 Nov 2026 14:34:11 GMT",
+    "Expires": "-1",
+    "Public": "OPTIONS,TRACE,GET,HEAD,POST",
+    "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+    "Vary": "Accept-Encoding",
+    "X-Build": "1.1.827.0",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "X-Request-ID": "8dc3d644-b03b-434b-bf5a-04554405b078",
+    "X-UA-Compatible": "IE=edge",
+    "X-XSS-Protection": "1; mode=block",
+    "x-ms-gateway-requestid": "a72fd034-61e1-4cf8-8258-12f13ed4e78b"
+   }
+  },
+  {
+   "status": 200,
+   "url": "https://atlasauth.b2clogin.com/f50ebcfb-eadd-41d8-9099-a7049d073f5c/B2C_1A_atoproduction_Atlas_SUSI/client/perftrace?tx=StateProperties=eyJUSUQiOiI4ZGMzZDY0NC1iMDNiLTQzNGItYmY1YS0w",
+   "headers": {
+    "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+    "Cache-Control": "no-store, must-revalidate, no-cache",
+    "x-ms-gateway-requestid": "4ec8e9ba-a9a5-42a2-99f1-13801a973c66",
+    "Public": "OPTIONS,TRACE,GET,HEAD,POST",
+    "X-Content-Type-Options": "nosniff",
+    "Allow": "OPTIONS, TRACE, GET, HEAD, POST",
+    "Content-Length": "0",
+    "X-XSS-Protection": "1; mode=block",
+    "Date": "Mon, 02 Nov 2026 14:34:16 GMT",
+    "X-Frame-Options": "DENY"
+   }
+  },
+  {
+   "status": 200,
+   "url": "https://atlasauth.b2clogin.com/f50ebcfb-eadd-41d8-9099-a7049d073f5c/B2C_1A_atoproduction_Atlas_SUSI/SelfAsserted?tx=StateProperties=eyJUSUQiOiI4ZGMzZDY0NC1iMDNiLTQzNGItYmY1YS0wNDU1",
+   "headers": {
+    "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+    "Cache-Control": "no-store, must-revalidate, no-cache",
+    "Content-Encoding": "gzip",
+    "x-ms-gateway-requestid": "baaa1dfa-7d40-4a1d-9a19-2f0ee4b925f0",
+    "Public": "OPTIONS,TRACE,GET,HEAD,POST",
+    "X-Content-Type-Options": "nosniff",
+    "Allow": "OPTIONS, TRACE, GET, HEAD, POST",
+    "Content-Length": "327",
+    "X-XSS-Protection": "1; mode=block",
+    "Date": "Mon, 02 Nov 2026 14:34:23 GMT",
+    "Content-Type": "text/json; charset=utf-8",
+    "Vary": "Accept-Encoding",
+    "X-Frame-Options": "DENY"
+   }
+  }
+ ],
+ "preSubmit": {
+  "url": "https://atlasauth.b2clogin.com/f50ebcfb-eadd-41d8-9099-a7049d073f5c/b2c_1a_atoproduction_atlas_susi/oauth2/v2.0/authorize?client_id=607d08d6-b63b-4735",
+  "title": "User details - Self Asserted",
+  "signInName": true,
+  "password": true,
+  "continueBtn": true,
+  "SETTINGS": {
+   "retryLimit": 3,
+   "cfgRetryLimit": "7",
+   "pageViewId": "a72fd034-61e1-4cf8-8258-12f13ed4e78b"
+  },
+  "serverError": "",
+  "pageLevelErr": "A required field is missing. Please fill out all required fields and try again.",
+  "bodyHasBlockMsg": false,
+  "bodyBlockText": "Prohibited conduct:"
+ },
+ "attemptMade": true,
+ "postSubmit": {
+  "url": "https://atlasauth.b2clogin.com/f50ebcfb-eadd-41d8-9099-a7049d073f5c/b2c_1a_atoproduction_atlas_susi/oauth2/v2.0/authorize?client_id=607d08d6-b63b-4735",
+  "title": "User details - Self Asserted",
+  "signInName": true,
+  "serverError": "Login not allowed for your account at this moment. Your account may have been temporarily blocked due to prohibited use of automation, which violated USTravelDocs policies.",
+  "pageLevelErr": "A required field is missing. Please fill out all required fields and try again.",
+  "bodyBlockText": "Prohibited conduct:",
+  "kbqPresent": 0
+ }
+}

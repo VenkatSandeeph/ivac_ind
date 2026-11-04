@@ -1,0 +1,72 @@
+# Static IP proxy list — one proxy per line (this file is gitignored; it contains credentials).
+# Format: [protocol://]host:port[:username:password]
+#   protocol: http (default) or socks5 — mix and match per line.
+#   host:port              → no auth
+#   host:port:user:pass    → auth (password may itself contain ':')
+# Blank lines and lines starting with '#' are ignored.
+
+# --- Oxylabs Dedicated-ISP proxies (disp.oxylabs.io, port-based IP selection, verified 2026-10-19) ---
+# Each port maps to a different static IP:
+#   8001 → 45.155.196.8    8002 → 31.98.3.61      8003 → 82.24.193.14    8004 → 64.139.34.50
+#   8005 → 64.139.35.49    8006 → 45.155.198.1    8007 → 45.155.197.0    8008 → 82.25.15.24
+#   8009 → 31.98.1.109     8010 → 31.98.2.87      8011 → 82.25.244.73    8012 → 64.105.212.98
+#   8013 → 64.105.213.16   8014 → 217.180.44.8    8015 → 217.180.45.1    8016 → 31.98.28.82
+#   8017 → 31.98.29.81     8018 → 195.40.58.16    8019 → 205.188.182.31  8020 → 205.188.183.30
+#   8021 → 205.188.186.42  8022 → 205.188.187.68  8023 → 205.188.202.59  8024 → 189.81.28.21
+#   8025 → 82.108.104.44   8026 → 82.23.228.48    8027 → 45.155.199.0    8028 → 195.40.32.23
+#   8029 → 195.40.33.13    8030 → 82.24.206.25    8031 → 192.177.95.40   8032 → 189.81.29.17
+#   8033 → 142.252.181.1   8034 → 23.230.208.12   8035 → 205.188.119.36
+disp.oxylabs.io:8001:user-disp_728c4059:yC3q50e+jDTt
+disp.oxylabs.io:8002:user-disp_728c4059:yC3q50e+jDTt
+disp.oxylabs.io:8003:user-disp_728c4059:yC3q50e+jDTt
+disp.oxylabs.io:8004:user-disp_728c4059:yC3q50e+jDTt
+disp.oxylabs.io:8005:user-disp_728c4059:yC3q50e+jDTt
+disp.oxylabs.io:8006:user-disp_728c4059:yC3q50e+jDTt
+disp.oxylabs.io:8007:user-disp_728c4059:yC3q50e+jDTt
+disp.oxylabs.io:8008:user-disp_728c4059:yC3q50e+jDTt
+disp.oxylabs.io:8009:user-disp_728c4059:yC3q50e+jDTt
+disp.oxylabs.io:8010:user-disp_728c4059:yC3q50e+jDTt
+disp.oxylabs.io:8011:user-disp_728c4059:yC3q50e+jDTt
+disp.oxylabs.io:8012:user-disp_728c4059:yC3q50e+jDTt
+disp.oxylabs.io:8013:user-disp_728c4059:yC3q50e+jDTt
+disp.oxylabs.io:8014:user-disp_728c4059:yC3q50e+jDTt
+disp.oxylabs.io:8015:user-disp_728c4059:yC3q50e+jDTt
+disp.oxylabs.io:8016:user-disp_728c4059:yC3q50e+jDTt
+disp.oxylabs.io:8017:user-disp_728c4059:yC3q50e+jDTt
+disp.oxylabs.io:8018:user-disp_728c4059:yC3q50e+jDTt
+disp.oxylabs.io:8019:user-disp_728c4059:yC3q50e+jDTt
+disp.oxylabs.io:8020:user-disp_728c4059:yC3q50e+jDTt
+disp.oxylabs.io:8021:user-disp_728c4059:yC3q50e+jDTt
+disp.oxylabs.io:8022:user-disp_728c4059:yC3q50e+jDTt
+disp.oxylabs.io:8023:user-disp_728c4059:yC3q50e+jDTt
+disp.oxylabs.io:8024:user-disp_728c4059:yC3q50e+jDTt
+disp.oxylabs.io:8025:user-disp_728c4059:yC3q50e+jDTt
+disp.oxylabs.io:8026:user-disp_728c4059:yC3q50e+jDTt
+disp.oxylabs.io:8027:user-disp_728c4059:yC3q50e+jDTt
+disp.oxylabs.io:8028:user-disp_728c4059:yC3q50e+jDTt
+disp.oxylabs.io:8029:user-disp_728c4059:yC3q50e+jDTt
+disp.oxylabs.io:8030:user-disp_728c4059:yC3q50e+jDTt
+disp.oxylabs.io:8031:user-disp_728c4059:yC3q50e+jDTt
+disp.oxylabs.io:8032:user-disp_728c4059:yC3q50e+jDTt
+disp.oxylabs.io:8033:user-disp_728c4059:yC3q50e+jDTt
+disp.oxylabs.io:8034:user-disp_728c4059:yC3q50e+jDTt
+disp.oxylabs.io:8035:user-disp_728c4059:yC3q50e+jDTt
+
+# --- Old Oxylabs ISP account (isp_87132a77 — still live, kept as fallback) ---
+ isp.oxylabs.io:8001:user-isp_87132a77:A~S~eg5bEZvR
+ isp.oxylabs.io:8002:user-isp_87132a77:A~S~eg5bEZvR
+ isp.oxylabs.io:8003:user-isp_87132a77:A~S~eg5bEZvR
+ isp.oxylabs.io:8004:user-isp_87132a77:A~S~eg5bEZvR
+ isp.oxylabs.io:8005:user-isp_87132a77:A~S~eg5bEZvR
+
+# --- Decodo ISP proxies (commented out — kept for reference) ---
+# gate.decodo.com:10001:sp7hgilb66:eh0o07vxUybz8~FHVa
+# gate.decodo.com:10002:sp7hgilb66:eh0o07vxUybz8~FHVa
+# gate.decodo.com:10003:sp7hgilb66:eh0o07vxUybz8~FHVa
+# gate.decodo.com:10004:sp7hgilb66:eh0o07vxUybz8~FHVa
+# gate.decodo.com:10005:sp7hgilb66:eh0o07vxUybz8~FHVa
+# gate.decodo.com:10006:sp7hgilb66:eh0o07vxUybz8~FHVa
+# gate.decodo.com:10007:sp7hgilb66:eh0o07vxUybz8~FHVa
+# gate.decodo.com:10008:sp7hgilb66:eh0o07vxUybz8~FHVa
+# gate.decodo.com:10009:sp7hgilb66:eh0o07vxUybz8~FHVa
+# gate.decodo.com:10010:sp7hgilb66:eh0o07vxUybz8~FHVa
